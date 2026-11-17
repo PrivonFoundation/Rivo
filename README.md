@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/rivo-logo.png" alt="Rivo" width="220" />
+  <img src="assets/rivo-avatar.png" alt="Rivo" width="140" height="140" />
 </p>
 
 # Rivo
