@@ -13,4 +13,5 @@ rustc-ice-*.txt
 # Secrets and local captures
 .env
 *.png
+!assets/*.png
 *.pcraft

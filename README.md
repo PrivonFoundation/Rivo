@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/rivo-logo.png" alt="Rivo" width="220" />
+</p>
+
 # Rivo
 
 A **desktop coding agent in pure Rust**, built on [Rune](https://github.com/anomalyco/rune) —
