@@ -21,7 +21,11 @@ text engine, layout and spring animations.
 - **Sessions & tabs** — project-grouped session list, multiple tabs, per-project collapse.
 - **Inspector tabs** — Details / Tools / Skills / Context, so the agent's state is always visible.
 
-```
+Clone with the pinned Rune checkout (it is a submodule, not vendored source):
+
+```bash
+git clone --recurse-submodules https://github.com/PrivonFoundation/Rivo.git
+cd Rivo
 cargo run -p rivo-app --bin rivo
 ```
 
