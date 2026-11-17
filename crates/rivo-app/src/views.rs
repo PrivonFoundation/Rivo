@@ -101,8 +101,9 @@ pub fn rail(s: &Rivo, k: &Kit, inset: f32) -> El {
         }))
         .child(col().grow(1.0))
         .child(
-            row().size(28.0, 28.0).radius(14.0).center().fill(rune::oklch(0.62, 0.12, 22.0))
-                .child(icon(&RIVO_MARK, 12.0).color(Color::WHITE))
+            row().size(28.0, 28.0).radius(14.0).center().fill(Color::BLACK)
+                .border(1.0, c.border_weak)
+                .child(icon(&RIVO_MARK, 14.0).color(Color::WHITE))
                 .help("Rivo"),
         )
 }
@@ -159,7 +160,7 @@ pub fn sidebar(s: &Rivo, k: &Kit) -> El {
     list = list.child(text("Projects").font(k.ty.small_medium).color(c.text_faint).pl(4.0));
     for (project, ids) in projects {
         let closed = s.closed_projects.iter().any(|p| p == project);
-        let (name, hue) = PROJECTS.iter().find(|(n, _)| *n == project).copied().unwrap_or((project, 250.0));
+        let (name, _) = PROJECTS.iter().find(|(n, _)| *n == project).copied().unwrap_or((project, 250.0));
         list = list.child(
             row().key(format!("project-{name}")).w_full().gap(7.0).center_y()
                 .on_press({
@@ -167,7 +168,8 @@ pub fn sidebar(s: &Rivo, k: &Kit) -> El {
                     move |s: &mut Rivo| s.toggle_project(&name)
                 })
                 .child(icon(&CHEVRON, 12.0).color(c.icon_faint).rotate(if closed { 0.0 } else { std::f32::consts::PI / 2.0 }))
-                .child(row().size(14.0, 14.0).radius(4.0).center().fill(rune::oklch(0.64, 0.12, hue))
+                .child(row().size(14.0, 14.0).radius(4.0).center().fill(Color::BLACK)
+                    .border(1.0, c.border_weak)
                     .child(text(name.chars().next().unwrap_or('?').to_ascii_uppercase().to_string()).font(k.ty.small).color(Color::WHITE)))
                 .child(text(name).font(k.ty.ui_medium).color(c.text_base))
                 .child(text(ids.len().to_string()).font(k.ty.small).color(c.text_faint))
@@ -333,8 +335,9 @@ fn message(m: &Message, k: &Kit, streaming: bool, i: usize) -> El {
         card = card.child(text("You").font(k.ty.small_medium).color(c.text_faint));
     } else {
         card = card.child(row().gap(7.0).center_y()
-            .child(row().size(16.0, 16.0).radius(4.0).center().fill(rune_theme_opencode::brand(k.dark))
-                .child(icon(&RIVO_MARK, 12.0).color(Color::WHITE)))
+            .child(row().size(16.0, 16.0).radius(4.0).center().fill(Color::BLACK)
+                .border(1.0, c.border_weak)
+                .child(icon(&RIVO_MARK, 11.0).color(Color::WHITE)))
             .child(text("Rivo").font(k.ty.small_medium).color(c.text_faint)));
     }
     if !m.text.is_empty() {
@@ -376,8 +379,9 @@ pub fn empty_state(s: &Rivo, k: &Kit) -> El {
             .child(text(label.to_owned()).font(k.ty.ui_compact).color(c.text_base))
     };
     col().key("empty-state").w_full().h_full().center().gap(18.0)
-        .child(row().size(44.0, 44.0).radius(12.0).center().fill(rune_theme_opencode::brand(k.dark))
-            .child(icon(&RIVO_MARK, 28.0).color(Color::WHITE)))
+        .child(row().size(44.0, 44.0).radius(12.0).center().fill(Color::BLACK)
+            .border(1.0, c.border_weak)
+            .child(icon(&RIVO_MARK, 30.0).color(Color::WHITE)))
         .child(text("What are we building?").font(rune::tok::type_::TITLE).color(c.text_base))
         .child(text("Rivo can read, edit and run code in your workspace — every tool call is shown below.")
             .font(k.ty.body).color(c.text_muted))
