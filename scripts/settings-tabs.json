@@ -1,0 +1,12 @@
+{
+  "events": [
+    { "t": 0.5, "type": "tap", "key": "settings-tab-Model" },
+    { "t": 1.2, "type": "mark", "name": "model" },
+    { "t": 1.4, "type": "tap", "key": "settings-tab-Skills" },
+    { "t": 2.0, "type": "mark", "name": "skills" },
+    { "t": 2.2, "type": "tap", "key": "settings-tab-Tools" },
+    { "t": 2.8, "type": "mark", "name": "tools" },
+    { "t": 3.0, "type": "tap", "key": "settings-tab-Permissions" },
+    { "t": 3.8, "type": "mark", "name": "permissions" }
+  ]
+}

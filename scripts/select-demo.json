@@ -1,0 +1,6 @@
+{
+  "events": [
+    { "t": 0.5, "type": "tap", "key": "theme-select-trigger" },
+    { "t": 1.2, "type": "mark", "name": "open" }
+  ]
+}

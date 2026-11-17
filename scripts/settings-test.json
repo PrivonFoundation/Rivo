@@ -1,0 +1,7 @@
+{
+  "events": [
+    { "t": 0.6, "type": "tap", "key": "model-1" },
+    { "t": 1.2, "type": "tap", "key": "settings-test" },
+    { "t": 8.0, "type": "mark", "name": "tested" }
+  ]
+}
