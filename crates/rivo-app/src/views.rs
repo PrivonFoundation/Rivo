@@ -39,6 +39,13 @@ static SETTINGS: Icon = Icon {
     name: "rivo-settings", view: 16.0,
     body: r#"<circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M8 1.5V3.2M8 12.8V14.5M14.5 8H12.8M3.2 8H1.5M12.6 3.4L11.4 4.6M4.6 11.4L3.4 12.6M12.6 12.6L11.4 11.4M4.6 4.6L3.4 3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
 };
+/// The Rivo mark, exported from VectorCraft (foundation-style geometric R).
+static RIVO_MARK: Icon = Icon {
+    name: "rivo-mark",
+    view: 240.0,
+    body: r#"<path fill="currentColor" fill-rule="evenodd" d="M14.4 240 L0 0 L28.8 0 L45.6 0 L165.6 0 C206.4 0 240 33.6 240 74.4 C240 115.2 206.4 148.8 165.6 148.8 L157.67 148.8 L230.4 230.4 L187.2 240 L105.913 148.8 L40.527 148.8 L38.4 211.2 Z M45.6 50.4 L45.6 115.2 L165.6 115.2 C192 115.2 206.4 100.8 206.4 81.6 C206.4 62.4 192 50.4 165.6 50.4 Z"/>"#,
+};
+
 static BACK: Icon = Icon {
     name: "rivo-back", view: 16.0,
     body: r#"<path d="M9.5 3.5L5 8L9.5 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
@@ -95,7 +102,7 @@ pub fn rail(s: &Rivo, k: &Kit, inset: f32) -> El {
         .child(col().grow(1.0))
         .child(
             row().size(28.0, 28.0).radius(14.0).center().fill(rune::oklch(0.62, 0.12, 22.0))
-                .child(text("R").font(k.ty.small_medium).color(Color::WHITE))
+                .child(icon(&RIVO_MARK, 12.0).color(Color::WHITE))
                 .help("Rivo"),
         )
 }
@@ -327,7 +334,7 @@ fn message(m: &Message, k: &Kit, streaming: bool, i: usize) -> El {
     } else {
         card = card.child(row().gap(7.0).center_y()
             .child(row().size(16.0, 16.0).radius(4.0).center().fill(rune_theme_opencode::brand(k.dark))
-                .child(text("R").font(k.ty.small_medium).color(Color::WHITE)))
+                .child(icon(&RIVO_MARK, 12.0).color(Color::WHITE)))
             .child(text("Rivo").font(k.ty.small_medium).color(c.text_faint)));
     }
     if !m.text.is_empty() {
@@ -370,7 +377,7 @@ pub fn empty_state(s: &Rivo, k: &Kit) -> El {
     };
     col().key("empty-state").w_full().h_full().center().gap(18.0)
         .child(row().size(44.0, 44.0).radius(12.0).center().fill(rune_theme_opencode::brand(k.dark))
-            .child(text("R").font(rune::tok::type_::TITLE).color(Color::WHITE)))
+            .child(icon(&RIVO_MARK, 28.0).color(Color::WHITE)))
         .child(text("What are we building?").font(rune::tok::type_::TITLE).color(c.text_base))
         .child(text("Rivo can read, edit and run code in your workspace — every tool call is shown below.")
             .font(k.ty.body).color(c.text_muted))
