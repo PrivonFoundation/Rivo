@@ -8,7 +8,8 @@ use rivo_agent::{
 };
 use rune::{Color, El, Icon, col, el, icon, row, text};
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Markdown, TextArea,
+    Button, ButtonVariant, Combobox, ComboboxOption, ControlSize, IconButton, IconButtonVariant,
+    Kit, Markdown, Placement, TextArea,
 };
 
 use crate::{Rivo, InspectorTab, PROJECTS, SettingsTab};
@@ -366,7 +367,7 @@ pub fn transcript(s: &Rivo, k: &Kit) -> El {
         list = list.child(text(format!("Context compacted — {removed} older messages folded."))
             .font(k.ty.small).color(k.c.text_faint));
     }
-    list
+    k.scroll_bar(list)
 }
 
 pub fn empty_state(s: &Rivo, k: &Kit) -> El {
@@ -395,7 +396,7 @@ pub fn empty_state(s: &Rivo, k: &Kit) -> El {
 
 // ----------------------------------------------------------------------------- composer
 
-pub fn composer(s: &Rivo, k: &Kit) -> El {
+pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     let busy = s.busy();
     let send = if busy {
@@ -406,6 +407,43 @@ pub fn composer(s: &Rivo, k: &Kit) -> El {
             .on_press(|s: &mut Rivo| s.submit()).build(k)
     };
     let usage = format!("~{:.1}k / {}k context", s.context_used as f32 / 1000.0, s.context_window / 1000);
+    let model_options: Vec<ComboboxOption> = KILO_FREE_MODELS
+        .iter()
+        .map(|m| ComboboxOption {
+            id: m.id.into(),
+            label: m.name.into(),
+            detail: format!("{} · {}", m.context, m.note),
+            disabled: false,
+        })
+        .collect();
+    let current_model = KILO_FREE_MODELS
+        .iter()
+        .find(|m| m.id == s.config.model)
+        .map(|m| m.name)
+        .unwrap_or(s.config.model.as_str());
+    let model_trigger = Button::new(format!("{current_model}  ⌄"))
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .help("Switch model")
+        .build(k);
+    // Popup lists take their scrollbar colours from the kit. Use a picker-only kit with a
+    // higher-contrast thumb so the bar stays visible while the model list scrolls.
+    let mut picker_kit = k.clone();
+    picker_kit.c.border_base = k.c.text_muted;
+    picker_kit.c.border_strong = k.c.text_base;
+    let model_picker = Combobox::new("composer-model", &s.model_picker, &model_options, |s: &mut Rivo| {
+        &mut s.model_picker
+    })
+    .current(Some(&s.config.model))
+    .placeholder("Choose model")
+    .search_placeholder("Search models…")
+    .empty_message("No models match")
+    .width(360.0)
+    .max_height(220.0)
+    .placement(Placement::TopStart)
+    .trigger(model_trigger)
+    .on_choose(|s: &mut Rivo, id, _| s.choose_model(id))
+    .build(&picker_kit, layer);
     col().key("composer").w_full().max_w(820.0)
         .radius(k.radius.lg).border(1.0, c.border_base).fill(c.layer_01)
         .padding(10.0).gap(8.0)
@@ -416,9 +454,7 @@ pub fn composer(s: &Rivo, k: &Kit) -> El {
             .on_submit(|s: &mut Rivo, _| s.submit()).build(k))
         .child(row().justify_between().center_y()
             .child(row().gap(8.0).center_y()
-                .child(Button::new(format!("{}  ⌄", s.config.model))
-                    .variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
-                    .on_press(|s: &mut Rivo| { s.settings_tab = SettingsTab::Model; s.open_settings(); }).build(k))
+                .child(model_picker)
                 .child(text(usage).font(k.ty.small).color(c.text_faint)))
             .child(row().gap(6.0).center_y()
                 .child(IconButton::new(&PLUS).variant(IconButtonVariant::GhostMuted).help("Skills")

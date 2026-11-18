@@ -18,7 +18,7 @@ use rivo_agent::{
 };
 use rune::{AppSpec, Chrome, Color, Cx, El, KeyEvent, Spring, TextEdit, Tx, col, row};
 use rune_kit::shell::{PaneMotion, PaneState, SidebarPeek, SidebarToggle, SplitView};
-use rune_kit::ControlSize;
+use rune_kit::{ComboboxState, ControlSize};
 
 pub const PROJECTS: [(&str, f32); 4] = [("rivo", 22.0), ("rune", 250.0), ("site", 150.0), ("notes", 320.0)];
 
@@ -60,7 +60,7 @@ pub struct Rivo {
     pub theme_override: Option<bool>,
     pub settings_preset: Preset,
     pub free_index: usize,
-    pub model_search: TextEdit,
+    pub model_picker: ComboboxState,
     pub connection_status: String,
     pub testing: bool,
     // Agent configuration
@@ -126,7 +126,7 @@ impl Rivo {
             theme_override: None,
             settings_preset: preset,
             free_index,
-            model_search: TextEdit::new(""),
+            model_picker: ComboboxState::default(),
             connection_status: String::new(),
             testing: false,
             model_config,
@@ -229,7 +229,7 @@ impl Rivo {
         self.base_url = TextEdit::new(self.config.base_url.clone());
         self.api_key = TextEdit::new(self.config.api_key.clone());
         self.model_name = TextEdit::new(self.config.model.clone());
-        self.model_search = TextEdit::new("");
+        self.model_picker.close();
         self.context_window_edit = TextEdit::new(self.model_config.context_window.to_string());
         self.max_output_edit = TextEdit::new(self.model_config.max_output.to_string());
         self.temperature_edit = TextEdit::new(format!("{}", self.model_config.temperature));
@@ -310,6 +310,29 @@ impl Rivo {
     pub fn choose_free_model(&mut self, index: usize) {
         self.free_index = index;
         self.connection_status.clear();
+    }
+
+    /// Switch the active model from the composer picker. Picking a Kilo free model also
+    /// switches the provider to the free gateway, so the composer is enough for a quick change.
+    pub fn choose_model(&mut self, id: &str) {
+        if let Some(index) = KILO_FREE_MODELS.iter().position(|m| m.id == id) {
+            let model = KILO_FREE_MODELS[index];
+            let used = context::conversation_tokens(&self.current().messages);
+            let window = parse_context_label(model.context).unwrap_or(self.context_window);
+            self.free_index = index;
+            self.config = ProviderConfig::kilo_free(model.id);
+            self.settings_preset = Preset::KiloFree;
+            self.model_name = TextEdit::new(self.config.model.clone());
+            self.base_url = TextEdit::new(self.config.base_url.clone());
+            self.api_key = TextEdit::new(self.config.api_key.clone());
+            self.model_config.context_window = window;
+            self.context_window = window;
+            self.context_window_edit = TextEdit::new(window.to_string());
+            self.context_used = used;
+            self.connection_status.clear();
+            self.model_picker.close();
+            save_config(&self.config, &self.model_config, &self.agent_settings);
+        }
     }
 
     /// The config the settings form currently describes, before pressing Apply.
@@ -628,6 +651,26 @@ fn on_key(s: &mut Rivo, ev: &KeyEvent, _: &mut Tx) -> bool {
     false
 }
 
+fn parse_context_label(label: &str) -> Option<usize> {
+    let label = label.trim();
+    let digits: String = label.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let value: usize = digits.parse().ok()?;
+    let suffix = label[digits.len()..].trim();
+    let multiplier = if suffix.is_empty() {
+        1
+    } else if suffix.eq_ignore_ascii_case("k") {
+        1_000
+    } else if suffix.eq_ignore_ascii_case("m") {
+        1_000_000
+    } else {
+        return None;
+    };
+    value.checked_mul(multiplier)
+}
+
 fn view(s: &Rivo, cx: &mut Cx<Rivo>) -> El {
     let dark = s.theme_override.unwrap_or_else(|| cx.system_dark());
     let k = rune_theme_opencode::kit(dark);
@@ -636,6 +679,7 @@ fn view(s: &Rivo, cx: &mut Cx<Rivo>) -> El {
     }
     let inset = cx.titlebar_inset();
     let fresh = s.current().messages.len() <= 1 && !s.busy();
+    let mut layer = Vec::new();
     let main = col()
         .key("main-pane")
         .w_full()
@@ -647,7 +691,7 @@ fn view(s: &Rivo, cx: &mut Cx<Rivo>) -> El {
             col().grow(1.0).min_h(0.0)
                 .child(if fresh { views::empty_state(s, k) } else { views::transcript(s, k) }),
         )
-        .child(row().w_full().padding(14.0).center().child(views::composer(s, k)));
+        .child(row().w_full().padding(14.0).center().child(views::composer(s, k, &mut layer)));
 
     // The shell card (and the empty toolbar band above the transcript) must be black too;
     // panels keep the normal palette so they contrast against the centre.
@@ -678,7 +722,10 @@ fn view(s: &Rivo, cx: &mut Cx<Rivo>) -> El {
         .reduced_motion(cx.is_reduced_motion())
         .build(&shell_kit);
 
-    rune::row().w_full().h_full().child(views::rail(s, k, inset)).child(split.grow(1.0))
+    rune_kit::root(
+        rune::row().w_full().h_full().child(views::rail(s, k, inset)).child(split.grow(1.0)),
+        layer,
+    )
 }
 
 fn scene_demo(s: &mut Rivo) {
