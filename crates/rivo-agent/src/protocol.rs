@@ -6,7 +6,7 @@ use std::io::Read;
 
 use serde_json::{Value, json};
 
-use crate::model::{ChatInput, ProviderConfig, Role, ToolCall};
+use crate::model::{Message, ProviderConfig, Role, ToolCall};
 use crate::settings::ModelConfig;
 use crate::provider::StreamEvent;
 use crate::tools::{Tool, openai_specs};
@@ -37,14 +37,14 @@ pub fn chat(
     config: &ProviderConfig,
     model: &ModelConfig,
     run: &crate::settings::RunConfig,
-    input: &ChatInput,
+    messages: &[Message],
     tools: &[Box<dyn Tool>],
     emit: &mut dyn FnMut(StreamEvent),
 ) -> Result<(), String> {
     match model.protocol {
-        crate::model::Protocol::OpenAiCompatible => chat_openai(config, model, run, input, tools, emit),
-        crate::model::Protocol::Anthropic => chat_anthropic(config, model, run, input, tools, emit),
-        crate::model::Protocol::Gemini => chat_gemini(config, model, run, input, tools, emit),
+        crate::model::Protocol::OpenAiCompatible => chat_openai(config, model, run, messages, tools, emit),
+        crate::model::Protocol::Anthropic => chat_anthropic(config, model, run, messages, tools, emit),
+        crate::model::Protocol::Gemini => chat_gemini(config, model, run, messages, tools, emit),
     }
 }
 
@@ -103,9 +103,9 @@ fn sse(resp: ureq::Response, mut line: impl FnMut(&str) -> Result<bool, String>)
 
 // --------------------------------------------------------------------------- OpenAI
 
-fn openai_messages(run: &crate::settings::RunConfig, input: &ChatInput) -> Value {
+fn openai_messages(run: &crate::settings::RunConfig, messages: &[Message]) -> Value {
     let mut out = vec![json!({"role": "system", "content": system_prompt(run)})];
-    for m in &input.messages {
+    for m in messages {
         match m.role {
             Role::System => out.push(json!({"role": "system", "content": m.text})),
             Role::User => out.push(json!({"role": "user", "content": m.text})),
@@ -144,7 +144,7 @@ fn chat_openai(
     config: &ProviderConfig,
     model: &ModelConfig,
     run: &crate::settings::RunConfig,
-    input: &ChatInput,
+    messages: &[Message],
     tools: &[Box<dyn Tool>],
     emit: &mut dyn FnMut(StreamEvent),
 ) -> Result<(), String> {
@@ -153,7 +153,7 @@ fn chat_openai(
         "stream": true,
         "temperature": model.temperature,
         "max_tokens": model.max_output,
-        "messages": openai_messages(run, input),
+        "messages": openai_messages(run, messages),
         "tools": openai_specs(tools),
     })
     .to_string();
@@ -198,9 +198,9 @@ fn chat_openai(
 
 // ------------------------------------------------------------------------- Anthropic
 
-fn anthropic_messages(input: &ChatInput) -> Value {
+fn anthropic_messages(messages: &[Message]) -> Value {
     let mut out = Vec::new();
-    for m in &input.messages {
+    for m in messages {
         match m.role {
             Role::User => out.push(json!({"role": "user", "content": m.text})),
             Role::Assistant => {
@@ -239,7 +239,7 @@ fn chat_anthropic(
     config: &ProviderConfig,
     model: &ModelConfig,
     run: &crate::settings::RunConfig,
-    input: &ChatInput,
+    messages: &[Message],
     tools: &[Box<dyn Tool>],
     emit: &mut dyn FnMut(StreamEvent),
 ) -> Result<(), String> {
@@ -252,7 +252,7 @@ fn chat_anthropic(
         "max_tokens": model.max_output,
         "temperature": model.temperature,
         "system": system_prompt(run),
-        "messages": anthropic_messages(input),
+        "messages": anthropic_messages(messages),
         "tools": tool_defs,
         "stream": true,
     })
@@ -319,9 +319,9 @@ fn chat_anthropic(
 
 // ---------------------------------------------------------------------------- Gemini
 
-fn gemini_contents(input: &ChatInput) -> Value {
+fn gemini_contents(messages: &[Message]) -> Value {
     let mut out = Vec::new();
-    for m in &input.messages {
+    for m in messages {
         let role = if m.role == Role::User { "user" } else { "model" };
         let mut parts: Vec<Value> = Vec::new();
         if !m.text.is_empty() {
@@ -355,7 +355,7 @@ fn chat_gemini(
     config: &ProviderConfig,
     model: &ModelConfig,
     run: &crate::settings::RunConfig,
-    input: &ChatInput,
+    messages: &[Message],
     tools: &[Box<dyn Tool>],
     emit: &mut dyn FnMut(StreamEvent),
 ) -> Result<(), String> {
@@ -365,7 +365,7 @@ fn chat_gemini(
         .collect();
     let body = json!({
         "system_instruction": {"parts": [{"text": system_prompt(run)}]},
-        "contents": gemini_contents(input),
+        "contents": gemini_contents(messages),
         "tools": [{"function_declarations": declarations}],
         "generationConfig": {"temperature": model.temperature, "maxOutputTokens": model.max_output},
     })

@@ -19,7 +19,6 @@ fn a_mock_turn_calls_a_tool_and_finishes() {
     let input = ChatInput {
         messages: vec![Message::new(Role::User, "list the files in this workspace")],
         cwd: dir.clone(),
-        model: "mock".into(),
     };
     let config = ProviderConfig::mock();
     let (tx, rx) = mpsc::channel();
@@ -47,7 +46,6 @@ fn errors_are_reported_when_no_api_key_is_set() {
     let input = ChatInput {
         messages: vec![Message::new(Role::User, "hi")],
         cwd: PathBuf::from("."),
-        model: config.model.clone(),
     };
     let (tx, rx) = mpsc::channel();
     rivo_agent::engine::spawn(
@@ -70,7 +68,6 @@ fn a_cancelled_turn_stops_emitting_deltas() {
     let input = ChatInput {
         messages: vec![Message::new(Role::User, "write a very long document for me")],
         cwd: PathBuf::from("."),
-        model: "mock".into(),
     };
     let config = ProviderConfig::mock();
     let (tx, rx) = mpsc::channel();

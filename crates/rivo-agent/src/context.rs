@@ -28,10 +28,16 @@ pub fn usage(messages: &[Message], window: usize) -> ContextUsage {
     ContextUsage { used, window, ratio: used as f32 / window.max(1) as f32 }
 }
 
+/// Whether compaction would actually change the history. Checking this first avoids cloning
+/// the whole conversation on every tool-loop step when it is still below the threshold.
+pub fn needs_compaction(messages: &[Message], keep_recent: usize, window: usize) -> bool {
+    conversation_tokens(messages) >= window * 85 / 100 && messages.len() > keep_recent + 2
+}
+
 /// Keep the first user message (the task) and the `keep_recent` newest messages. Everything
 /// between becomes a short marker, so the model still knows there was earlier work.
 pub fn compact(messages: &[Message], keep_recent: usize, window: usize) -> (Vec<Message>, usize) {
-    if conversation_tokens(messages) < window * 85 / 100 || messages.len() <= keep_recent + 2 {
+    if !needs_compaction(messages, keep_recent, window) {
         return (messages.to_vec(), 0);
     }
     let anchor = messages.iter().find(|m| m.role == Role::User).cloned();

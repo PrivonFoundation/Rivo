@@ -11,6 +11,6 @@ path = "src/main.rs"
 [dependencies]
 rivo-agent = { path = "../rivo-agent" }
 serde_json = "1"
-rune = { path = "../../vendor/rune/crates/rune" }
+rune = { path = "../../vendor/rune/crates/rune", default-features = false, features = ["accessibility", "dbus"] }
 rune-kit = { path = "../../vendor/rune/crates/rune-kit", features = ["markdown"] }
 rune-theme-opencode = { path = "../../vendor/rune/themes/opencode" }

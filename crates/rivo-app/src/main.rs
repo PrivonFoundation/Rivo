@@ -385,7 +385,6 @@ impl Rivo {
         let input = ChatInput {
             messages: session.messages[..count - 1].to_vec(),
             cwd: session.cwd.clone(),
-            model: self.config.model.clone(),
         };
         let run = RunConfig::new(
             self.config.clone(),

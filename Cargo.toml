@@ -19,3 +19,15 @@ license = "MIT"
 
 [profile.dev]
 debug = "line-tables-only"
+
+# Keep the shipped binary small without dropping features. Fat LTO and one
+# codegen unit let the compiler inline across crates and discard unreachable
+# monomorphisations; `z` optimises for size, and symbols are stripped.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+incremental = false

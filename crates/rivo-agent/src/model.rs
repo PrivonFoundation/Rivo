@@ -94,7 +94,6 @@ impl Session {
 pub struct ChatInput {
     pub messages: Vec<Message>,
     pub cwd: PathBuf,
-    pub model: String,
 }
 
 /// Events emitted by the engine, drained by the UI in `AppSpec::poll`.

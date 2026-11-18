@@ -42,14 +42,18 @@ fn execute(
 
     let provider = provider::make(&run);
     let tools: Vec<_> = all_tools().into_iter().filter(|t| run.settings.tool_enabled(t.name())).collect();
-    let ctx = ToolContext::new(input.cwd.clone(), run.settings.permission, run.skills.clone());
-    let mut history = input.messages.clone();
+    let ChatInput { messages, cwd } = input;
+    let ctx = ToolContext::new(cwd, run.settings.permission, run.skills.clone());
+    let mut history = messages;
 
     for step in 0..run.settings.max_steps {
         if cancel.load(Ordering::Relaxed) { break; }
 
-        // Fold old turns into a marker before they crowd out the useful context.
-        if run.settings.auto_compact {
+        // Fold old turns into a marker before they crowd out the useful context. The
+        // `needs_compaction` check keeps this allocation-free while the history is small.
+        if run.settings.auto_compact
+            && context::needs_compaction(&history, run.settings.keep_recent, run.model.context_window)
+        {
             let (compacted, removed) = context::compact(&history, run.settings.keep_recent, run.model.context_window);
             if removed > 0 {
                 history = compacted;
@@ -62,9 +66,8 @@ fn execute(
         let mut turn_text = String::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut index = 0usize;
-        let prompt = ChatInput { messages: history.clone(), cwd: input.cwd.clone(), model: input.model.clone() };
 
-        let result = provider.chat(&run, &prompt, &mut |ev| {
+        let result = provider.chat(&run, &history, &mut |ev| {
             if cancel.load(Ordering::Relaxed) { return; }
             match ev {
                 StreamEvent::Delta(text) => {

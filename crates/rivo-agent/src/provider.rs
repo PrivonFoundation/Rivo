@@ -4,7 +4,7 @@
 use std::thread;
 use std::time::Duration;
 
-use crate::model::{ChatInput, Preset, ProviderConfig, Role};
+use crate::model::{Message, Preset, ProviderConfig, Role};
 use crate::protocol;
 use crate::settings::RunConfig;
 
@@ -16,7 +16,7 @@ pub enum StreamEvent {
 }
 
 pub trait Provider: Send + Sync {
-    fn chat(&self, run: &RunConfig, input: &ChatInput, emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String>;
+    fn chat(&self, run: &RunConfig, messages: &[Message], emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String>;
 }
 
 /// A lightweight connection check used by the settings screen. Runs on a worker thread.
@@ -73,9 +73,9 @@ pub fn make(run: &RunConfig) -> Box<dyn Provider> {
 
 struct RemoteProvider;
 impl Provider for RemoteProvider {
-    fn chat(&self, run: &RunConfig, input: &ChatInput, emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String> {
+    fn chat(&self, run: &RunConfig, messages: &[Message], emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String> {
         let tools = crate::tools::all_tools();
-        protocol::chat(&run.provider, &run.model, run, input, &tools, emit)
+        protocol::chat(&run.provider, &run.model, run, messages, &tools, emit)
     }
 }
 
@@ -84,10 +84,10 @@ impl Provider for RemoteProvider {
 struct MockProvider;
 
 impl Provider for MockProvider {
-    fn chat(&self, _run: &RunConfig, input: &ChatInput, emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String> {
-        let last_user = input.messages.iter().rev().find(|m| m.role == Role::User).map(|m| m.text.clone()).unwrap_or_default();
+    fn chat(&self, _run: &RunConfig, messages: &[Message], emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String> {
+        let last_user = messages.iter().rev().find(|m| m.role == Role::User).map(|m| m.text.clone()).unwrap_or_default();
         let lower = last_user.to_lowercase();
-        let last_was_tools = input.messages.last().is_some_and(|m| {
+        let last_was_tools = messages.last().is_some_and(|m| {
             m.role == Role::Assistant && !m.tools.is_empty() && m.tools.iter().all(|t| t.finished)
         });
 
@@ -141,7 +141,7 @@ impl Provider for MockProvider {
             thread::sleep(Duration::from_millis(12));
         }
         if let Some((name, arguments)) = tool {
-            emit(StreamEvent::ToolCall { id: format!("mock-{}", input.messages.len()), name, arguments });
+            emit(StreamEvent::ToolCall { id: format!("mock-{}", messages.len()), name, arguments });
         }
         emit(StreamEvent::Done);
         Ok(())

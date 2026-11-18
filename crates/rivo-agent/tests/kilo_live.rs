@@ -22,7 +22,6 @@ fn kilo_free_gateway_streams_a_tool_call() {
             "Use the list_dir tool to list the workspace, then answer with one short sentence.",
         )],
         cwd: std::env::current_dir().unwrap(),
-        model: config.model.clone(),
     };
     let (tx, rx) = std::sync::mpsc::channel();
     rivo_agent::engine::spawn(
