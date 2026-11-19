@@ -18,7 +18,7 @@ use rivo_agent::{
 };
 use rune::{AppSpec, Chrome, Color, Cx, El, KeyEvent, Spring, TextEdit, Tx, col, row};
 use rune_kit::shell::{PaneMotion, PaneState, SidebarPeek, SidebarToggle, SplitView};
-use rune_kit::{ComboboxState, ControlSize};
+use rune_kit::ControlSize;
 
 pub const PROJECTS: [(&str, f32); 4] = [("rivo", 22.0), ("rune", 250.0), ("site", 150.0), ("notes", 320.0)];
 
@@ -60,7 +60,8 @@ pub struct Rivo {
     pub theme_override: Option<bool>,
     pub settings_preset: Preset,
     pub free_index: usize,
-    pub model_picker: ComboboxState,
+    pub model_picker_open: bool,
+    pub model_search: TextEdit,
     pub connection_status: String,
     pub testing: bool,
     // Agent configuration
@@ -126,7 +127,8 @@ impl Rivo {
             theme_override: None,
             settings_preset: preset,
             free_index,
-            model_picker: ComboboxState::default(),
+            model_picker_open: false,
+            model_search: TextEdit::new(""),
             connection_status: String::new(),
             testing: false,
             model_config,
@@ -229,7 +231,7 @@ impl Rivo {
         self.base_url = TextEdit::new(self.config.base_url.clone());
         self.api_key = TextEdit::new(self.config.api_key.clone());
         self.model_name = TextEdit::new(self.config.model.clone());
-        self.model_picker.close();
+        self.close_model_picker();
         self.context_window_edit = TextEdit::new(self.model_config.context_window.to_string());
         self.max_output_edit = TextEdit::new(self.model_config.max_output.to_string());
         self.temperature_edit = TextEdit::new(format!("{}", self.model_config.temperature));
@@ -312,6 +314,22 @@ impl Rivo {
         self.connection_status.clear();
     }
 
+    pub fn toggle_model_picker(&mut self) {
+        if self.model_picker_open {
+            self.close_model_picker();
+        } else {
+            self.model_search = TextEdit::new("");
+            self.model_search.focused = true;
+            self.model_picker_open = true;
+        }
+    }
+
+    pub fn close_model_picker(&mut self) {
+        self.model_picker_open = false;
+        self.model_search.focused = false;
+        self.model_search = TextEdit::new("");
+    }
+
     /// Switch the active model from the composer picker. Picking a Kilo free model also
     /// switches the provider to the free gateway, so the composer is enough for a quick change.
     pub fn choose_model(&mut self, id: &str) {
@@ -330,7 +348,7 @@ impl Rivo {
             self.context_window_edit = TextEdit::new(window.to_string());
             self.context_used = used;
             self.connection_status.clear();
-            self.model_picker.close();
+            self.close_model_picker();
             save_config(&self.config, &self.model_config, &self.agent_settings);
         }
     }

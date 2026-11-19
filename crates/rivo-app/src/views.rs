@@ -8,8 +8,8 @@ use rivo_agent::{
 };
 use rune::{Color, El, Icon, col, el, icon, row, text};
 use rune_kit::{
-    Button, ButtonVariant, Combobox, ComboboxOption, ControlSize, IconButton, IconButtonVariant,
-    Kit, Markdown, Placement, TextArea,
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Markdown, Placement,
+    Popover, ScrollBar, ScrollBarStyle, TextArea, TextInput,
 };
 
 use crate::{Rivo, InspectorTab, PROJECTS, SettingsTab};
@@ -396,6 +396,26 @@ pub fn empty_state(s: &Rivo, k: &Kit) -> El {
 
 // ----------------------------------------------------------------------------- composer
 
+fn format_tokens(n: usize) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        if (m - m.round()).abs() < 0.05 {
+            format!("{}M", m.round() as usize)
+        } else {
+            format!("{m:.1}M")
+        }
+    } else if n >= 1_000 {
+        let k = n as f64 / 1_000.0;
+        if (k - k.round()).abs() < 0.05 {
+            format!("{}k", k.round() as usize)
+        } else {
+            format!("{k:.1}k")
+        }
+    } else {
+        n.to_string()
+    }
+}
+
 pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     let busy = s.busy();
@@ -406,16 +426,7 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         IconButton::new(&SEND).variant(IconButtonVariant::Submit).help("Send message")
             .on_press(|s: &mut Rivo| s.submit()).build(k)
     };
-    let usage = format!("~{:.1}k / {}k context", s.context_used as f32 / 1000.0, s.context_window / 1000);
-    let model_options: Vec<ComboboxOption> = KILO_FREE_MODELS
-        .iter()
-        .map(|m| ComboboxOption {
-            id: m.id.into(),
-            label: m.name.into(),
-            detail: format!("{} · {}", m.context, m.note),
-            disabled: false,
-        })
-        .collect();
+    let usage = format!("~{} / {} context", format_tokens(s.context_used), format_tokens(s.context_window));
     let current_model = KILO_FREE_MODELS
         .iter()
         .find(|m| m.id == s.config.model)
@@ -425,25 +436,63 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         .variant(ButtonVariant::Ghost)
         .control_size(ControlSize::Small)
         .help("Switch model")
+        .on_press(|s: &mut Rivo| s.toggle_model_picker())
         .build(k);
-    // Popup lists take their scrollbar colours from the kit. Use a picker-only kit with a
-    // higher-contrast thumb so the bar stays visible while the model list scrolls.
-    let mut picker_kit = k.clone();
-    picker_kit.c.border_base = k.c.text_muted;
-    picker_kit.c.border_strong = k.c.text_base;
-    let model_picker = Combobox::new("composer-model", &s.model_picker, &model_options, |s: &mut Rivo| {
-        &mut s.model_picker
-    })
-    .current(Some(&s.config.model))
-    .placeholder("Choose model")
-    .search_placeholder("Search models…")
-    .empty_message("No models match")
-    .width(360.0)
-    .max_height(220.0)
-    .placement(Placement::TopStart)
-    .trigger(model_trigger)
-    .on_choose(|s: &mut Rivo, id, _| s.choose_model(id))
-    .build(&picker_kit, layer);
+
+    let query = s.model_search.text.trim().to_lowercase();
+    let filtered: Vec<_> = KILO_FREE_MODELS
+        .iter()
+        .filter(|m| query.is_empty() || m.name.to_lowercase().contains(&query) || m.id.to_lowercase().contains(&query))
+        .collect();
+    let mut options = col().key("model-options").w_full().max_h(220.0).min_h(0.0)
+        .scroll(rune::ScrollSpec { stick_bottom: false }).scroll_edge_fade(8.0);
+    for m in &filtered {
+        let id = m.id;
+        let selected = s.config.model == id;
+        let mut row = row().w_full().min_h(28.0).padding(6.0).radius(k.radius.sm).gap(8.0).center_y()
+            .on_press(move |s: &mut Rivo| s.choose_model(id));
+        if selected { row = row.fill(k.c.hover); } else { row = row.hover(k.c.hover); }
+        row = row.child(col().gap(1.0).grow(1.0)
+            .child(text(m.name).font(k.ty.ui_compact).color(k.c.text_base))
+            .child(text(format!("{} · {}", m.id, m.context)).font(k.ty.small).color(k.c.text_muted)));
+        if selected { row = row.child(icon(&CHECK, 14.0).color(k.c.text_accent)); }
+        options = options.child(row);
+    }
+    if filtered.is_empty() {
+        options = options.child(text("No models match").font(k.ty.small).color(k.c.text_muted));
+    }
+    let options = options.scroll_bar_styled(
+        ScrollBarStyle::from_kit(k).inside().thumb(k.c.text_muted).thumb_hover(k.c.text_base),
+    );
+
+    let search = TextInput::new(&s.model_search)
+        .placeholder("Search models…")
+        .label("Search models")
+        .width(None)
+        .leading_icon(k.glyph.search)
+        .on_edit(|s: &mut Rivo| &mut s.model_search)
+        .on_key(|s: &mut Rivo, ev, _| {
+            if ev.key == rune::Key::Escape {
+                s.close_model_picker();
+                true
+            } else {
+                false
+            }
+        })
+        .build(k);
+    let body = col().key("model-picker-body").w_full().gap(6.0)
+        .child(search)
+        .child(el().key("model-picker-divider").w_full().h(1.0).fill(k.c.border_weak).a11y_hidden())
+        .child(options);
+    let model_picker = Popover::new("composer-model")
+        .trigger(model_trigger)
+        .open(s.model_picker_open)
+        .placement(Placement::TopStart)
+        .padding(10.0)
+        .label("Model")
+        .child(body)
+        .on_close(|s: &mut Rivo| s.close_model_picker())
+        .build(k, layer);
     col().key("composer").w_full().max_w(820.0)
         .radius(k.radius.lg).border(1.0, c.border_base).fill(c.layer_01)
         .padding(10.0).gap(8.0)
