@@ -3,6 +3,7 @@
 
 pub mod context;
 pub mod engine;
+pub mod info;
 pub mod model;
 pub mod protocol;
 pub mod provider;
@@ -12,7 +13,7 @@ pub mod tools;
 
 pub use model::{
     ChatInput, Event, EventKind, FreeModel, Message, Preset, Protocol, ProviderConfig, ProviderKind,
-    Role, Session, ToolCall, KILO_BASE_URL, KILO_FREE_MODELS,
+    Role, Session, TokenUsage, ToolCall, KILO_BASE_URL, KILO_FREE_MODELS,
 };
 pub use settings::{AgentSettings, ModelConfig, PermissionMode, RunConfig};
 pub use skills::Skill;

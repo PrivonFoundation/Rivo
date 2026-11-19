@@ -4,7 +4,7 @@
 use std::fmt::Write;
 
 use rivo_agent::{
-    KILO_FREE_MODELS, Message, PermissionMode, Preset, Protocol, Role, ToolCall,
+    KILO_FREE_MODELS, Message, PermissionMode, Preset, Protocol, Role, ToolCall, info,
 };
 use rune::{Color, El, Icon, col, el, icon, row, text};
 use rune_kit::{
@@ -66,6 +66,10 @@ static GRID: Icon = Icon {
 static CHEVRON: Icon = Icon {
     name: "rivo-chevron", view: 16.0,
     body: r#"<path d="M6 4L11 8L6 12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
+static CHEVRON_DOWN: Icon = Icon {
+    name: "rivo-chevron-down", view: 16.0,
+    body: r#"<path d="M4 6L8 11L12 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
 };
 static CLOSE: Icon = Icon {
     name: "rivo-close", view: 16.0,
@@ -326,29 +330,172 @@ fn fmt_json(v: &serde_json::Value, depth: usize, out: &mut String) {
     }
 }
 
+enum Segment {
+    Prose(String),
+    Code { lang: Option<String>, code: String },
+    Diff(String),
+}
+
+fn segments(text: &str) -> Vec<Segment> {
+    let mut out = Vec::new();
+    let mut prose = String::new();
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        let fence = if trimmed.starts_with("```") { "```" } else if trimmed.starts_with("~~~") { "~~~" } else { "" };
+        if fence.is_empty() {
+            prose.push_str(line);
+            prose.push('\n');
+            continue;
+        }
+        if !prose.trim().is_empty() {
+            out.push(Segment::Prose(std::mem::take(&mut prose)));
+        }
+        let info = trimmed[fence.len()..].trim();
+        let lang = info.split_whitespace().next().map(str::to_string);
+        let mut code = String::new();
+        while let Some(next) = lines.next() {
+            if next.trim_start().starts_with(fence) {
+                break;
+            }
+            code.push_str(next);
+            code.push('\n');
+        }
+        if lang.as_deref().is_some_and(|l| l.eq_ignore_ascii_case("diff") || l.eq_ignore_ascii_case("patch")) {
+            out.push(Segment::Diff(code));
+        } else {
+            out.push(Segment::Code { lang, code });
+        }
+    }
+    if !prose.trim().is_empty() {
+        out.push(Segment::Prose(prose));
+    }
+    out
+}
+
+fn code_block(lang: Option<&str>, code: &str, k: &Kit, key: &str) -> El {
+    let c = &k.c;
+    let mut frame = col().key(key.to_string()).w_full().max_w(760.0)
+        .radius(k.radius.md).border(1.0, c.border_weak).fill(c.layer_02)
+        .padding(12.0).gap(8.0);
+    if let Some(lang) = lang.filter(|l| !l.is_empty()) {
+        frame = frame.child(row().w_full().justify_between().center_y()
+            .child(text(lang.to_string()).font(k.ty.small_medium).color(c.text_muted))
+            .child(text(format!("{} lines", code.lines().count())).font(k.ty.small).color(c.text_faint)));
+    }
+    let mut lines = col().w_full();
+    for (n, line) in code.lines().enumerate() {
+        let shown = if line.is_empty() { " " } else { line };
+        lines = lines.child(row().w_full()
+            .child(row().w(34.0).justify_end().pr(8.0)
+                .child(text((n + 1).to_string()).font(k.ty.small).color(c.text_faint)))
+            .child(text(shown).font(k.ty.mono).color(c.text_base).wrap().w_full()));
+    }
+    frame.child(lines)
+}
+
+fn parse_hunk(line: &str) -> Option<(usize, usize)> {
+    let old = line.split('-').nth(1)?
+        .split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?.parse().ok()?;
+    let new = line.split('+').nth(1)?
+        .split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?.parse().ok()?;
+    Some((old, new))
+}
+
+fn diff_block(diff: &str, k: &Kit, key: &str) -> El {
+    let c = &k.c;
+    let mut old_no = 1usize;
+    let mut new_no = 1usize;
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    let mut rows = col().w_full();
+    for (n, line) in diff.lines().enumerate() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.starts_with("@@") {
+            if let Some((old, new)) = parse_hunk(line) {
+                old_no = old;
+                new_no = new;
+            }
+            rows = rows.child(row().key(format!("{key}-h{n}")).w_full().px(8.0).py(3.0)
+                .child(text(line).font(k.ty.small).color(c.text_muted)));
+            continue;
+        }
+        if line.starts_with("---") || line.starts_with("+++") || line.starts_with("diff ") || line.starts_with("index ") {
+            rows = rows.child(row().key(format!("{key}-h{n}")).w_full().px(8.0).py(3.0)
+                .child(text(line).font(k.ty.small).color(c.text_muted)));
+            continue;
+        }
+        let (old_label, new_label, tint) = match line.as_bytes().first() {
+            Some(b'+') => {
+                added += 1;
+                let label = new_no.to_string();
+                new_no += 1;
+                (String::new(), label, Some(c.success.fg.alpha(0.14)))
+            }
+            Some(b'-') => {
+                removed += 1;
+                let label = old_no.to_string();
+                old_no += 1;
+                (label, String::new(), Some(c.danger.fg.alpha(0.14)))
+            }
+            Some(b'\\') => (String::new(), String::new(), None),
+            _ => {
+                let old = old_no.to_string();
+                let new = new_no.to_string();
+                old_no += 1;
+                new_no += 1;
+                (old, new, None)
+            }
+        };
+        let shown = if line.is_empty() { " " } else { line };
+        let mut r = row().key(format!("{key}-l{n}")).w_full().px(6.0).py(1.0);
+        if let Some(tint) = tint {
+            r = r.fill(tint);
+        }
+        r = r.child(row().w(34.0).justify_end().pr(6.0)
+            .child(text(old_label).font(k.ty.small).color(c.text_faint)));
+        r = r.child(row().w(34.0).justify_end().pr(6.0)
+            .child(text(new_label).font(k.ty.small).color(c.text_faint)));
+        r = r.child(text(shown).font(k.ty.mono).color(c.text_base).wrap().w_full());
+        rows = rows.child(r);
+    }
+    let summary = row().w_full().justify_between().center_y()
+        .child(text("Diff").font(k.ty.small_medium).color(c.text_muted))
+        .child(row().gap(8.0)
+            .child(text(format!("+{added}")).font(k.ty.small_medium).color(c.success.fg))
+            .child(text(format!("−{removed}")).font(k.ty.small_medium).color(c.danger.fg)));
+    col().key(key.to_string()).w_full().max_w(760.0)
+        .radius(k.radius.md).border(1.0, c.border_weak).fill(c.layer_02)
+        .padding(10.0).gap(6.0)
+        .child(summary)
+        .child(rows)
+}
+
 fn message(m: &Message, k: &Kit, streaming: bool, i: usize) -> El {
     let c = &k.c;
-    let user = m.role == Role::User;
-    let mut card = col().key(format!("msg-{i}")).w_full().max_w(760.0)
-        .radius(k.radius.lg).border(1.0, if user { c.border_weak } else { c.border_muted })
-        .fill(if user { c.layer_02 } else { c.layer_01 }).padding(14.0).gap(10.0);
-    if user {
-        card = card.child(text("You").font(k.ty.small_medium).color(c.text_faint));
-    } else {
-        card = card.child(row().gap(7.0).center_y()
-            .child(row().size(16.0, 16.0).radius(4.0).center().fill(Color::BLACK)
-                .border(1.0, c.border_weak)
-                .child(icon(&RIVO_MARK, 11.0).color(Color::WHITE)))
-            .child(text("Rivo").font(k.ty.small_medium).color(c.text_faint)));
+    if m.role != Role::User {
+        let mut out = col().key(format!("msg-{i}")).w_full().max_w(760.0).gap(12.0);
+        if !m.text.is_empty() {
+            for (j, segment) in segments(&m.text).into_iter().enumerate() {
+                let key = format!("msg-{i}-{j}");
+                out = out.child(match segment {
+                    Segment::Prose(text) => el().key(key).child(Markdown::new(text)
+                        .streaming(streaming).reveal(if streaming { 0.12 } else { 0.0 }).selectable(true).build(k)),
+                    Segment::Code { lang, code } => code_block(lang.as_deref(), &code, k, &key),
+                    Segment::Diff(diff) => diff_block(&diff, k, &key),
+                });
+            }
+        }
+        for call in &m.tools { out = out.child(tool_card(call, k)); }
+        return out;
     }
+
+    let mut card = col().key(format!("msg-{i}")).w_full().max_w(760.0)
+        .radius(k.radius.lg).border(1.0, c.border_weak)
+        .fill(c.layer_02).padding(14.0).gap(10.0)
+        .child(text("You").font(k.ty.small_medium).color(c.text_faint));
     if !m.text.is_empty() {
-        let body = if user {
-            text(m.text.clone()).font(k.ty.body).color(c.text_base).wrap().selectable(true)
-        } else {
-            el().key(format!("md-{i}")).child(Markdown::new(m.text.clone())
-                .streaming(streaming).reveal(if streaming { 0.12 } else { 0.0 }).selectable(true).build(k))
-        };
-        card = card.child(body);
+        card = card.child(text(m.text.clone()).font(k.ty.body).color(c.text_base).wrap().selectable(true));
     }
     for call in &m.tools { card = card.child(tool_card(call, k)); }
     card
@@ -361,7 +508,7 @@ pub fn transcript(s: &Rivo, k: &Kit) -> El {
         .scroll(rune::ScrollSpec { stick_bottom: true }).scroll_edge_fade(14.0);
     for (i, m) in session.messages.iter().enumerate() {
         let streaming = s.busy() && i + 1 == session.messages.len() && m.role == Role::Assistant;
-        list = list.child(message(m, k, streaming, i));
+        list = list.child(row().w_full().center().child(message(m, k, streaming, i)));
     }
     if let Some(removed) = s.compaction_notice {
         list = list.child(text(format!("Context compacted — {removed} older messages folded."))
@@ -514,11 +661,63 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
 
 // ---------------------------------------------------------------------------- inspector
 
+fn money(v: f64) -> String {
+    if v.abs() < 0.005 && v.is_sign_negative() { "$0.00".into() } else { format!("${v:.2}") }
+}
+
+fn grouped(n: u64) -> String {
+    let raw = n.to_string();
+    let mut out = String::with_capacity(raw.len() + raw.len() / 3);
+    for (i, ch) in raw.chars().enumerate() {
+        if i > 0 && (raw.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn short_path(path: &str, max: usize) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= max {
+        return path.to_string();
+    }
+    let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
+    format!("…{tail}")
+}
+
+fn model_label(name: &str) -> String {
+    KILO_FREE_MODELS.iter().find(|m| m.id == name).map(|m| m.name).unwrap_or(name).to_string()
+}
+
+fn metric_row(k: &Kit, label: &str, value: String) -> El {
+    row().w_full().min_h(22.0).gap(8.0).center_y()
+        .child(text(label.to_string()).font(k.ty.small).color(k.c.text_muted))
+        .child(el().grow(1.0))
+        .child(text(value).font(k.ty.mono).color(k.c.text_base).truncate())
+}
+
+fn section_header(s: &Rivo, k: &Kit, key: &str, title: &str, suffix: Option<String>) -> El {
+    let c = &k.c;
+    let open = s.info_open(key);
+    let key = key.to_string();
+    let mut h = row().key(format!("section-{key}")).w_full().min_h(28.0).padding(4.0)
+        .radius(k.radius.sm).gap(6.0).center_y().hover(c.hover)
+        .on_press(move |s: &mut Rivo| s.toggle_info_section(&key));
+    h = h.child(icon(if open { &CHEVRON_DOWN } else { &CHEVRON }, 12.0).color(c.icon_muted))
+        .child(text(title.to_string()).font(k.ty.small_medium).color(c.text_base));
+    if let Some(suffix) = suffix {
+        h = h.child(el().grow(1.0))
+            .child(text(suffix).font(k.ty.small).color(c.text_muted).truncate());
+    }
+    h
+}
+
 fn tab_pill(s: &Rivo, k: &Kit, label: &str, tab: InspectorTab) -> El {
     let c = &k.c;
     let active = s.inspector_tab == tab;
     let mut b = row().padding(7.0).radius(k.radius.sm).center()
-        .on_press(move |s: &mut Rivo| s.inspector_tab = tab);
+        .on_press(move |s: &mut Rivo| s.set_inspector_tab(tab));
     if active { b = b.fill(c.layer_03); } else { b = b.hover(c.hover); }
     b.child(text(label.to_string()).font(k.ty.small).color(if active { c.text_base } else { c.text_muted }))
 }
@@ -535,10 +734,10 @@ pub fn inspector(s: &Rivo, k: &Kit) -> El {
         .fill(c.layer_01)
         .scroll(rune::ScrollSpec { stick_bottom: false });
     body = body.child(row().gap(3.0).w_full()
+        .child(tab_pill(s, k, "Info", InspectorTab::Info))
         .child(tab_pill(s, k, "Details", InspectorTab::Details))
         .child(tab_pill(s, k, "Tools", InspectorTab::Tools))
-        .child(tab_pill(s, k, "Skills", InspectorTab::Skills))
-        .child(tab_pill(s, k, "Context", InspectorTab::Context)));
+        .child(tab_pill(s, k, "Skills", InspectorTab::Skills)));
 
     match s.inspector_tab {
         InspectorTab::Details => {
@@ -581,16 +780,96 @@ pub fn inspector(s: &Rivo, k: &Kit) -> El {
                 body = body.child(r);
             }
         }
-        InspectorTab::Context => {
+        InspectorTab::Info => {
             let pct = (s.context_used as f32 / s.context_window.max(1) as f32 * 100.0).min(100.0);
-            body = body.child(text("Context window").font(k.ty.ui_medium).color(c.text_base))
-                .child(field("Used", format!("~{} tokens ({pct:.0}%)", s.context_used)))
-                .child(field("Window", format!("{} tokens", s.context_window)))
-                .child(el().h(6.0).w_full().radius(3.0).fill(c.layer_03).child(
-                    el().h(6.0).w(pct.max(1.0)).radius(3.0).fill(if pct > 85.0 { c.danger.fg } else { c.text_accent })));
-            if s.agent_settings.auto_compact {
-                body = body.child(text(format!("Auto-compact after {} recent messages are kept.", s.agent_settings.keep_recent))
-                    .font(k.ty.small).color(c.text_muted).wrap());
+            let cost: f64 = s.model_stats.iter().map(|m| info::cost_usd(&m.name, &m.usage)).sum();
+            let usage = &s.token_usage;
+
+            body = body.child(section_header(s, k, "context", "Context", Some(format!("{pct:.0}% · {}", money(cost)))));
+            if s.info_open("context") {
+                body = body.child(field("Used", format!("~{} tokens", format_tokens(s.context_used))))
+                    .child(field("Window", format!("{} tokens", format_tokens(s.context_window))))
+                    .child(el().h(6.0).w_full().radius(3.0).fill(c.layer_03).child(
+                        el().h(6.0).w(pct.max(1.0)).radius(3.0)
+                            .fill(if pct > 85.0 { c.danger.fg } else { c.text_accent })));
+                if s.agent_settings.auto_compact {
+                    body = body.child(text(format!("Auto-compact keeps {} recent messages.", s.agent_settings.keep_recent))
+                        .font(k.ty.small).color(c.text_muted).wrap());
+                }
+            }
+
+            let total = usage.input + usage.output + usage.reasoning + usage.cache_read + usage.cache_write;
+            body = body.child(section_header(s, k, "tokens", "Token Usage", Some(grouped(total))));
+            if s.info_open("tokens") {
+                body = body.child(metric_row(k, "Input", grouped(usage.input)))
+                    .child(metric_row(k, "Output", grouped(usage.output)))
+                    .child(metric_row(k, "Reasoning", grouped(usage.reasoning)))
+                    .child(metric_row(k, "Cache read", grouped(usage.cache_read)))
+                    .child(metric_row(k, "Cache write", grouped(usage.cache_write)))
+                    .child(metric_row(k, "Cache rate", format!("{:.1}%", usage.cache_rate())))
+                    .child(metric_row(k, "Cost", money(cost)));
+            }
+
+            body = body.child(section_header(s, k, "models", "Models", Some(format!("({})", s.model_stats.len()))));
+            if s.info_open("models") {
+                body = body.child(row().w_full().gap(4.0).padding(4.0)
+                    .child(text("Model".to_string()).font(k.ty.small).color(c.text_faint))
+                    .child(el().grow(1.0))
+                    .child(text("Steps".to_string()).font(k.ty.small).color(c.text_faint).w(36.0))
+                    .child(text("Cost".to_string()).font(k.ty.small).color(c.text_faint).w(46.0)));
+                for stat in &s.model_stats {
+                    let stat_cost = info::cost_usd(&stat.name, &stat.usage);
+                    body = body.child(row().w_full().min_h(26.0).padding(4.0).gap(4.0).center_y().hover(c.hover)
+                        .child(col().grow(1.0).min_w(0.0)
+                            .child(text(model_label(&stat.name)).font(k.ty.ui_compact).color(c.text_base).truncate()))
+                        .child(text(stat.steps.to_string()).font(k.ty.mono).color(c.text_muted).w(36.0))
+                        .child(text(money(stat_cost)).font(k.ty.mono).color(c.text_muted).w(46.0)));
+                }
+                if s.model_stats.is_empty() {
+                    body = body.child(text("No model calls in this session yet.").font(k.ty.small).color(c.text_muted));
+                }
+            }
+
+            body = body.child(section_header(s, k, "mcp", "MCP", Some(format!("({})", s.mcp_servers.len()))));
+            if s.info_open("mcp") {
+                for server in &s.mcp_servers {
+                    let ok = server.status == "Configured" || server.status == "Remote configured";
+                    body = body.child(row().w_full().min_h(26.0).padding(4.0).gap(6.0).center_y()
+                        .child(icon(&RUNNING, 10.0).color(if ok { c.success.fg } else { c.danger.fg }))
+                        .child(col().grow(1.0).min_w(0.0)
+                            .child(text(server.name.clone()).font(k.ty.ui_compact).color(c.text_base).truncate()))
+                        .child(text(server.status.clone()).font(k.ty.small)
+                            .color(if ok { c.text_muted } else { c.danger.fg }).truncate()));
+                }
+                if s.mcp_servers.is_empty() {
+                    body = body.child(text("No MCP servers configured.").font(k.ty.small).color(c.text_muted));
+                }
+                body = body.child(text("Status reflects local config; Rivo does not host MCP transports yet.")
+                    .font(k.ty.small).color(c.text_faint).wrap());
+            }
+
+            body = body.child(section_header(s, k, "indexing", "Code Indexing", Some("Disabled".into())));
+            if s.info_open("indexing") {
+                body = body.child(text("Code indexing is disabled.").font(k.ty.small).color(c.text_muted).wrap());
+            }
+
+            body = body.child(section_header(s, k, "lsp", "LSP", None));
+            if s.info_open("lsp") {
+                body = body.child(text("LSPs are disabled.").font(k.ty.small).color(c.text_muted).wrap());
+            }
+
+            body = body.child(section_header(s, k, "files", "Modified Files", Some(format!("({})", s.modified_files.len()))));
+            if s.info_open("files") {
+                for file in &s.modified_files {
+                    body = body.child(row().w_full().min_h(26.0).padding(4.0).gap(6.0).center_y()
+                        .child(col().grow(1.0).min_w(0.0)
+                            .child(text(short_path(&file.path, 34)).font(k.ty.mono).color(c.text_base).truncate()))
+                        .child(text(format!("+{}", file.added)).font(k.ty.mono).color(c.success.fg).w(38.0))
+                        .child(text(format!("-{}", file.removed)).font(k.ty.mono).color(c.danger.fg).w(38.0)));
+                }
+                if s.modified_files.is_empty() {
+                    body = body.child(text("Working tree is clean.").font(k.ty.small).color(c.text_muted));
+                }
             }
         }
     }

@@ -10,11 +10,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use rivo_agent::{
     AgentSettings, ChatInput, Event, EventKind, KILO_FREE_MODELS, Message, ModelConfig,
-    PermissionMode, Preset, Protocol, ProviderConfig, Role, RunConfig, Session, Skill, context,
+    PermissionMode, Preset, Protocol, ProviderConfig, Role, RunConfig, Session, Skill, TokenUsage,
+    context, info::{McpServer, ModifiedFile},
 };
 use rune::{AppSpec, Chrome, Color, Cx, El, KeyEvent, Spring, TextEdit, Tx, col, row};
 use rune_kit::shell::{PaneMotion, PaneState, SidebarPeek, SidebarToggle, SplitView};
@@ -34,10 +36,25 @@ pub enum SettingsTab {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InspectorTab {
+    Info,
     Details,
     Tools,
     Skills,
-    Context,
+}
+
+/// Accumulated numbers for one model in the inspector's Models table.
+#[derive(Clone, Debug, Default)]
+pub struct ModelStat {
+    pub name: String,
+    pub steps: usize,
+    pub usage: TokenUsage,
+}
+
+/// Workspace facts gathered on a worker thread.
+#[derive(Clone, Debug, Default)]
+struct InfoSnapshot {
+    files: Vec<ModifiedFile>,
+    mcp: Vec<McpServer>,
 }
 
 pub struct Rivo {
@@ -76,6 +93,14 @@ pub struct Rivo {
     pub context_used: usize,
     pub context_window: usize,
     pub compaction_notice: Option<usize>,
+    // Info centre
+    pub token_usage: TokenUsage,
+    pub model_stats: Vec<ModelStat>,
+    pub modified_files: Vec<ModifiedFile>,
+    pub mcp_servers: Vec<McpServer>,
+    pub info_sections: HashMap<String, bool>,
+    info_rx: Option<mpsc::Receiver<InfoSnapshot>>,
+    last_info_refresh: f64,
     probe_rx: Option<mpsc::Receiver<Result<String, String>>>,
     events: mpsc::Receiver<Event>,
     engine_tx: mpsc::Sender<Event>,
@@ -134,7 +159,7 @@ impl Rivo {
             model_config,
             agent_settings,
             skills,
-            inspector_tab: InspectorTab::Details,
+            inspector_tab: InspectorTab::Info,
             context_window_edit: TextEdit::new(window.to_string()),
             max_output_edit: TextEdit::new(max_output.to_string()),
             temperature_edit: TextEdit::new(format!("{temperature}")),
@@ -142,6 +167,13 @@ impl Rivo {
             context_used: 0,
             context_window: window,
             compaction_notice: None,
+            token_usage: TokenUsage::default(),
+            model_stats: Vec::new(),
+            modified_files: Vec::new(),
+            mcp_servers: Vec::new(),
+            info_sections: HashMap::new(),
+            info_rx: None,
+            last_info_refresh: -1.0,
             probe_rx: None,
             events,
             engine_tx,
@@ -158,6 +190,40 @@ impl Rivo {
 
     pub fn busy(&self) -> bool {
         self.current().busy
+    }
+
+    pub fn set_inspector_tab(&mut self, tab: InspectorTab) {
+        self.inspector_tab = tab;
+        if tab == InspectorTab::Info {
+            self.refresh_info();
+        }
+    }
+
+    /// Sections start expanded; the map holds only the ones the user collapsed.
+    pub fn info_open(&self, key: &str) -> bool {
+        !self.info_sections.get(key).is_some_and(|open| !open)
+    }
+
+    pub fn toggle_info_section(&mut self, key: &str) {
+        let open = self.info_open(key);
+        self.info_sections.insert(key.to_string(), !open);
+    }
+
+    /// Git and MCP discovery touch the filesystem, so they run on a worker thread.
+    fn refresh_info(&mut self) {
+        if self.info_rx.is_some() {
+            return;
+        }
+        let cwd = self.current().cwd.clone();
+        let (tx, rx) = mpsc::channel();
+        self.info_rx = Some(rx);
+        thread::spawn(move || {
+            let snapshot = InfoSnapshot {
+                files: rivo_agent::info::modified_files(&cwd),
+                mcp: rivo_agent::info::mcp_servers(&cwd),
+            };
+            let _ = tx.send(snapshot);
+        });
     }
 
     fn index(&self) -> usize {
@@ -496,6 +562,21 @@ impl Rivo {
                 self.context_used = used;
                 self.context_window = window;
             }
+            EventKind::ModelStep { model } => {
+                if let Some(stat) = self.model_stats.iter_mut().find(|m| m.name == model) {
+                    stat.steps += 1;
+                } else {
+                    self.model_stats.push(ModelStat { name: model, steps: 1, usage: TokenUsage::default() });
+                }
+            }
+            EventKind::ModelUsage { model, usage } => {
+                self.token_usage.add(usage);
+                if let Some(stat) = self.model_stats.iter_mut().find(|m| m.name == model) {
+                    stat.usage.add(usage);
+                } else {
+                    self.model_stats.push(ModelStat { name: model, steps: 0, usage });
+                }
+            }
         }
         true
     }
@@ -627,10 +708,23 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-fn poll(s: &mut Rivo, _clock: f64, tx: &mut Tx) -> bool {
+fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     while let Ok(ev) = s.events.try_recv() {
         changed |= s.apply_event(ev);
+    }
+    if let Some(rx) = &s.info_rx {
+        if let Ok(snapshot) = rx.try_recv() {
+            s.modified_files = snapshot.files;
+            s.mcp_servers = snapshot.mcp;
+            s.info_rx = None;
+            changed = true;
+        }
+    }
+    let info_visible = s.inspector.is_open() && s.inspector_tab == InspectorTab::Info;
+    if info_visible && clock - s.last_info_refresh > 2.0 {
+        s.last_info_refresh = clock;
+        s.refresh_info();
     }
     if let Some(rx) = &s.probe_rx {
         if let Ok(result) = rx.try_recv() {
@@ -645,6 +739,10 @@ fn poll(s: &mut Rivo, _clock: f64, tx: &mut Tx) -> bool {
     }
     if s.busy() || s.testing {
         tx.wake_after(ms(16));
+    }
+    if info_visible {
+        // Keep counts and the working-tree view warm while the info centre is open.
+        tx.wake_after(ms(500));
     }
     changed
 }
@@ -750,6 +848,10 @@ fn scene_demo(s: &mut Rivo) {
     s.sessions = vec![demo::demo_session()];
     s.selected = "demo".into();
     s.open_tabs = vec!["demo".into()];
+    // Headless scenes draw one frame, so seed the async info-centre data here.
+    let cwd = PathBuf::from(".");
+    s.modified_files = rivo_agent::info::modified_files(&cwd);
+    s.mcp_servers = rivo_agent::info::mcp_servers(&cwd);
 }
 
 fn scene_streaming(s: &mut Rivo) {

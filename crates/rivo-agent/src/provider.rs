@@ -4,7 +4,7 @@
 use std::thread;
 use std::time::Duration;
 
-use crate::model::{Message, Preset, ProviderConfig, Role};
+use crate::model::{Message, Preset, ProviderConfig, Role, TokenUsage};
 use crate::protocol;
 use crate::settings::RunConfig;
 
@@ -12,6 +12,8 @@ use crate::settings::RunConfig;
 pub enum StreamEvent {
     Delta(String),
     ToolCall { id: String, name: String, arguments: String },
+    /// Token counters from the provider's final usage object, if it sends one.
+    Usage(TokenUsage),
     Done,
 }
 
@@ -143,6 +145,17 @@ impl Provider for MockProvider {
         if let Some((name, arguments)) = tool {
             emit(StreamEvent::ToolCall { id: format!("mock-{}", messages.len()), name, arguments });
         }
+        // Synthetic counters so the inspector's usage/cost widgets are exercised offline.
+        let mut input = (messages.iter().map(|m| m.text.len()).sum::<usize>() / 4) as u64;
+        let cache_read = input * 4 / 5;
+        input -= cache_read;
+        emit(StreamEvent::Usage(TokenUsage {
+            input,
+            output: (text.len() / 4) as u64,
+            reasoning: 0,
+            cache_read,
+            cache_write: 0,
+        }));
         emit(StreamEvent::Done);
         Ok(())
     }

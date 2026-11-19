@@ -6,7 +6,7 @@ use std::io::Read;
 
 use serde_json::{Value, json};
 
-use crate::model::{Message, ProviderConfig, Role, ToolCall};
+use crate::model::{Message, ProviderConfig, Role, TokenUsage, ToolCall};
 use crate::settings::ModelConfig;
 use crate::provider::StreamEvent;
 use crate::tools::{Tool, openai_specs};
@@ -140,6 +140,24 @@ fn flush_calls(calls: &mut BTreeMap<usize, (String, String, String)>, emit: &mut
     }
 }
 
+/// Copy a numeric usage field only when the provider actually reported it. Streaming
+/// APIs send usage across several events, so we must not reset earlier counters.
+fn take_u64(v: &Value, key: &str, dst: &mut u64) {
+    if let Some(n) = v.get(key).and_then(Value::as_u64) {
+        *dst = n;
+    }
+}
+
+fn nested_u64(v: &Value, parent: &str, key: &str) -> u64 {
+    v.get(parent).and_then(|p| p.get(key)).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn emit_usage(usage: TokenUsage, emit: &mut dyn FnMut(StreamEvent)) {
+    if usage != TokenUsage::default() {
+        emit(StreamEvent::Usage(usage));
+    }
+}
+
 fn chat_openai(
     config: &ProviderConfig,
     model: &ModelConfig,
@@ -160,10 +178,20 @@ fn chat_openai(
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
     let resp = post(&url, config, &[], body)?;
     let mut calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+    let mut usage = TokenUsage::default();
     sse(resp, |data| {
         let v: Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
         if let Some(err) = v.get("error") {
             return Err(format!("api error: {err}"));
+        }
+        if let Some(u) = v.get("usage") {
+            let cached = nested_u64(u, "prompt_tokens_details", "cached_tokens");
+            let mut prompt = 0u64;
+            take_u64(u, "prompt_tokens", &mut prompt);
+            usage.input = prompt.saturating_sub(cached);
+            usage.cache_read = cached;
+            take_u64(u, "completion_tokens", &mut usage.output);
+            usage.reasoning = nested_u64(u, "completion_tokens_details", "reasoning_tokens");
         }
         let Some(choice) = v.get("choices").and_then(|c| c.as_array().and_then(|a| a.first())) else { return Ok(false) };
         let delta = &choice["delta"];
@@ -192,6 +220,7 @@ fn chat_openai(
         Ok(false)
     })?;
     flush_calls(&mut calls, emit);
+    emit_usage(usage, emit);
     emit(StreamEvent::Done);
     Ok(())
 }
@@ -269,10 +298,17 @@ fn chat_anthropic(
 
     // index -> (id, name, accumulated json)
     let mut calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+    let mut usage = TokenUsage::default();
     sse(resp, |data| {
         let v: Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
         if let Some(err) = v.get("error") {
             return Err(format!("api error: {err}"));
+        }
+        if let Some(u) = v.get("usage").or_else(|| v.get("message").and_then(|m| m.get("usage"))) {
+            take_u64(u, "input_tokens", &mut usage.input);
+            take_u64(u, "output_tokens", &mut usage.output);
+            take_u64(u, "cache_read_input_tokens", &mut usage.cache_read);
+            take_u64(u, "cache_creation_input_tokens", &mut usage.cache_write);
         }
         match v.get("type").and_then(Value::as_str) {
             Some("content_block_start") => {
@@ -313,6 +349,7 @@ fn chat_anthropic(
         Ok(false)
     })?;
     flush_calls(&mut calls, emit);
+    emit_usage(usage, emit);
     emit(StreamEvent::Done);
     Ok(())
 }
@@ -381,10 +418,21 @@ fn chat_gemini(
     let resp = ureq::post(&url).set("Content-Type", "application/json").send_string(&body)
         .map_err(|e| format!("gemini request failed: {e}"))?;
     let mut counter = 0usize;
+    let mut usage = TokenUsage::default();
     sse(resp, |data| {
         let v: Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
         if let Some(err) = v.get("error") {
             return Err(format!("api error: {err}"));
+        }
+        if let Some(u) = v.get("usageMetadata") {
+            let mut cached = 0u64;
+            let mut prompt = 0u64;
+            take_u64(u, "cachedContentTokenCount", &mut cached);
+            take_u64(u, "promptTokenCount", &mut prompt);
+            usage.input = prompt.saturating_sub(cached);
+            usage.cache_read = cached;
+            take_u64(u, "candidatesTokenCount", &mut usage.output);
+            take_u64(u, "thoughtsTokenCount", &mut usage.reasoning);
         }
         let Some(candidate) = v.get("candidates").and_then(|c| c.as_array().and_then(|a| a.first())) else { return Ok(false) };
         if let Some(parts) = candidate.get("content").and_then(|c| c.get("parts")).and_then(Value::as_array) {
@@ -404,6 +452,7 @@ fn chat_gemini(
         }
         Ok(false)
     })?;
+    emit_usage(usage, emit);
     emit(StreamEvent::Done);
     Ok(())
 }

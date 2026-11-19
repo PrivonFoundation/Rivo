@@ -105,6 +105,36 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+/// Token counters reported by a provider for one model call.
+///
+/// `input` holds only uncached input tokens: providers that bundle cached tokens into
+/// their prompt count have them subtracted, so `cache_rate` stays comparable between
+/// OpenAI, Anthropic and Gemini.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub reasoning: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl TokenUsage {
+    pub fn add(&mut self, other: TokenUsage) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+    }
+
+    /// Percentage of input served from cache, 0.0–100.0.
+    pub fn cache_rate(&self) -> f64 {
+        let total = self.input.saturating_add(self.cache_read);
+        if total == 0 { 0.0 } else { self.cache_read as f64 / total as f64 * 100.0 }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum EventKind {
     /// A chunk of assistant text (streaming).
@@ -121,6 +151,10 @@ pub enum EventKind {
     ContextCompacted { removed: usize },
     /// Approximate context usage after a turn (input tokens).
     Usage { used: usize, window: usize },
+    /// One provider call finished: a step of the agent's tool loop.
+    ModelStep { model: String },
+    /// Token counts reported by the provider for that call, when available.
+    ModelUsage { model: String, usage: TokenUsage },
 }
 
 /// The Kilo Code free gateway: OpenAI-compatible, no API key, 200 requests/hour per IP.

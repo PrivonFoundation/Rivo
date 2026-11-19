@@ -34,6 +34,8 @@ fn a_mock_turn_calls_a_tool_and_finishes() {
     });
     assert!(started.is_some(), "called list_dir: {events:?}");
     assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ToolFinished { ok: true, .. })), "tool succeeded");
+    assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ModelStep { .. })), "reported a model step");
+    assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ModelUsage { usage, .. } if usage.output > 0)), "reported token usage");
     assert!(matches!(events.last().unwrap().kind, EventKind::Done), "turn completed");
     assert_eq!(events.last().unwrap().turn, 1);
 

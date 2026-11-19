@@ -41,6 +41,7 @@ fn execute(
     }
 
     let provider = provider::make(&run);
+    let model = run.provider.model.clone();
     let tools: Vec<_> = all_tools().into_iter().filter(|t| run.settings.tool_enabled(t.name())).collect();
     let ChatInput { messages, cwd } = input;
     let ctx = ToolContext::new(cwd, run.settings.permission, run.skills.clone());
@@ -80,10 +81,16 @@ fn execute(
                     send(EventKind::ToolStarted(call.clone()));
                     calls.push(call);
                 }
+                StreamEvent::Usage(usage) => {
+                    send(EventKind::ModelUsage { model: model.clone(), usage });
+                }
                 StreamEvent::Done => {}
             }
         });
 
+        if result.is_ok() {
+            send(EventKind::ModelStep { model: model.clone() });
+        }
         if let Err(e) = result {
             if !cancel.load(Ordering::Relaxed) { send(EventKind::Error(e)); }
             break;
