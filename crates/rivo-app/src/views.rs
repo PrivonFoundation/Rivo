@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 use rivo_agent::{
     KILO_FREE_MODELS, Message, PermissionMode, Preset, Protocol, Role, ToolCall, info,
+    registry::InstallSpec,
 };
 use rune::{Color, El, Icon, col, el, icon, row, text};
 use rune_kit::{
@@ -74,6 +75,14 @@ static CHEVRON_DOWN: Icon = Icon {
 static CLOSE: Icon = Icon {
     name: "rivo-close", view: 16.0,
     body: r#"<path d="M5 5L11 11M11 5L5 11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+};
+static STORE: Icon = Icon {
+    name: "rivo-store", view: 16.0,
+    body: r#"<path d="M2.5 6.5L3.5 2.5H12.5L13.5 6.5M2.5 6.5V13H13.5V6.5M2.5 6.5H13.5M6 13V9.5H10V13" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>"#,
+};
+static BADGE: Icon = Icon {
+    name: "rivo-badge", view: 16.0,
+    body: r#"<path d="M8 2L10 3.6L12.8 3.2L13.6 6L15.5 8L13.6 10L12.8 12.8L10 12.4L8 14L6 12.4L3.2 12.8L2.4 10L0.5 8L2.4 6L3.2 3.2L6 3.6Z" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M5.5 8L7.3 9.7L10.6 6.3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
 };
 
 // ------------------------------------------------------------------------- left rail
@@ -897,6 +906,8 @@ fn settings_nav(s: &Rivo, k: &Kit) -> El {
         .child(settings_nav_item(s, k, "General", SettingsTab::Provider, &SETTINGS))
         .child(settings_nav_item(s, k, "Providers", SettingsTab::Connection, &SEARCH))
         .child(settings_nav_item(s, k, "Model & context", SettingsTab::Model, &GRID))
+        .child(settings_nav_item(s, k, "MCP Marketplace", SettingsTab::McpMarketplace, &STORE))
+        .child(settings_nav_item(s, k, "Skills Marketplace", SettingsTab::SkillsMarketplace, &STORE))
         .child(settings_nav_item(s, k, "Skills", SettingsTab::Skills, &CHECK))
         .child(settings_nav_item(s, k, "Tools", SettingsTab::Tools, &PLUS))
         .child(settings_nav_item(s, k, "Permissions", SettingsTab::Permissions, &HOME))
@@ -1090,6 +1101,80 @@ fn model_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         ]))
 }
 
+fn install_hint(spec: &InstallSpec) -> String {
+    match spec {
+        InstallSpec::Command { program, args, env } => {
+            let mut line = format!("{} {}", program, args.join(" "));
+            if !env.is_empty() {
+                line.push_str(&format!("   env: {}", env.join(", ")));
+            }
+            line
+        }
+        InstallSpec::Remote { url } if !url.is_empty() => format!("remote  {url}"),
+        InstallSpec::Skill { source, skill_id } => format!("{source}/{skill_id}"),
+        _ => "unsupported".into(),
+    }
+}
+
+fn marketplace_panel(s: &Rivo, k: &Kit) -> El {
+    let c = &k.c;
+    let mcp = s.settings_tab == SettingsTab::McpMarketplace;
+    let title = if mcp { "MCP Marketplace" } else { "Skills Marketplace" };
+    let source = if mcp { "Official MCP Registry" } else { "skills.sh" };
+    let search = TextInput::new(&s.marketplace_search)
+        .placeholder(if mcp { "Search MCP servers…" } else { "Search skills…" })
+        .label("Search marketplace")
+        .width(Some(420.0))
+        .leading_icon(k.glyph.search)
+        .on_edit(|s: &mut Rivo| &mut s.marketplace_search)
+        .on_submit(|s: &mut Rivo, _| s.search_registry())
+        .build(k);
+    let button = Button::new(if s.registry_busy { "Searching…" } else { "Search" })
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .on_press(|s: &mut Rivo| s.search_registry())
+        .build(k);
+
+    let mut rows = Vec::new();
+    for (i, item) in s.registry_items.iter().enumerate() {
+        let installed = s.installed_ids.contains(&item.id);
+        let desc = if item.description.is_empty() { install_hint(&item.install) } else { item.description.clone() };
+        let detail = format!("{}  ·  {}", item.publisher, install_hint(&item.install));
+        let mut leading = col().grow(1.0).min_w(0.0).gap(3.0)
+            .child(row().gap(6.0).center_y()
+                .child(text(item.name.clone()).font(k.ty.ui).color(c.text_base).truncate())
+                .child(icon(&BADGE, 12.0).color(if item.verified { c.success.fg } else { c.icon_faint })))
+            .child(text(desc).font(k.ty.small).color(c.text_muted).wrap())
+            .child(text(detail).font(k.ty.small).color(c.text_faint).truncate());
+        if installed {
+            leading = leading.child(text("Installed").font(k.ty.small).color(c.success.fg));
+        }
+        rows.push(row().w_full().min_h(56.0).padding(12.0).gap(14.0).center_y().justify_between()
+            .child(leading)
+            .child(Button::new(if installed { "Added" } else { "Add" })
+                .variant(ButtonVariant::Contrast)
+                .control_size(ControlSize::Small)
+                .on_press(move |s: &mut Rivo| s.install_registry_item(i))
+                .build(k)));
+    }
+
+    let status = if s.registry_status.is_empty() {
+        format!("Free public source: {source}. No API key required.")
+    } else {
+        s.registry_status.clone()
+    };
+    col().w_full().gap(18.0)
+        .child(text(title).font(rune::tok::type_::TITLE).color(c.text_base))
+        .child(text(if mcp {
+            "Browse the official MCP Registry. Publishers verify a GitHub or DNS namespace, but the registry does not scan server code — review a server before adding it. Added servers are written to ~/.config/rivo/mcp.json and load on restart."
+        } else {
+            "Browse public skills indexed by skills.sh. Install counts and partner audit results are shown on skills.sh; read a skill's SKILL.md before using it. One click downloads it to .rivo/skills in your workspace."
+        }).font(k.ty.body).color(c.text_muted).wrap())
+        .child(row().w_full().gap(8.0).center_y().child(search).child(button))
+        .child(text(status).font(k.ty.small).color(c.text_muted).wrap())
+        .child(card(k, if mcp { "Servers" } else { "Skills" }, rows))
+}
+
 fn skills_panel(s: &Rivo, k: &Kit) -> El {
     let c = &k.c;
     let mut rows = Vec::new();
@@ -1156,6 +1241,7 @@ pub fn settings_page(s: &Rivo, k: &Kit, inset: f32) -> El {
         SettingsTab::Provider => general_panel(s, k, &mut layer),
         SettingsTab::Connection => provider_panel(s, k, &mut layer),
         SettingsTab::Model => model_panel(s, k, &mut layer),
+        SettingsTab::McpMarketplace | SettingsTab::SkillsMarketplace => marketplace_panel(s, k),
         SettingsTab::Skills => skills_panel(s, k),
         SettingsTab::Tools => tools_panel(s, k),
         SettingsTab::Permissions => permissions_panel(s, k, &mut layer),

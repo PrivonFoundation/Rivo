@@ -17,6 +17,7 @@ use rivo_agent::{
     AgentSettings, ChatInput, Event, EventKind, KILO_FREE_MODELS, Message, ModelConfig,
     PermissionMode, Preset, Protocol, ProviderConfig, Role, RunConfig, Session, Skill, TokenUsage,
     context, info::{McpServer, ModifiedFile},
+    registry::{self, RegistryItem},
 };
 use rune::{AppSpec, Chrome, Color, Cx, El, KeyEvent, Spring, TextEdit, Tx, col, row};
 use rune_kit::shell::{PaneMotion, PaneState, SidebarPeek, SidebarToggle, SplitView};
@@ -29,6 +30,8 @@ pub enum SettingsTab {
     Provider,
     Connection,
     Model,
+    McpMarketplace,
+    SkillsMarketplace,
     Skills,
     Tools,
     Permissions,
@@ -57,6 +60,13 @@ struct InfoSnapshot {
     mcp: Vec<McpServer>,
 }
 
+/// Result of a marketplace search or a one-click install, sent from a worker thread.
+enum RegistryResult {
+    Found { items: Vec<RegistryItem>, note: String },
+    Installed { message: String, skills: Vec<Skill> },
+    Failed(String),
+}
+
 pub struct Rivo {
     pub sessions: Vec<Session>,
     pub selected: String,
@@ -81,6 +91,13 @@ pub struct Rivo {
     pub model_search: TextEdit,
     pub connection_status: String,
     pub testing: bool,
+    // Marketplaces (MCP registry + skills.sh)
+    pub marketplace_search: TextEdit,
+    pub registry_items: Vec<RegistryItem>,
+    pub registry_status: String,
+    pub registry_busy: bool,
+    pub installed_ids: Vec<String>,
+    registry_rx: Option<mpsc::Receiver<RegistryResult>>,
     // Agent configuration
     pub model_config: ModelConfig,
     pub agent_settings: AgentSettings,
@@ -133,6 +150,10 @@ impl Rivo {
         let max_output = model_config.max_output;
         let temperature = model_config.temperature;
         let system_prompt_text = agent_settings.system_prompt.clone();
+        // Already-installed items show as "Added" in both marketplaces after a restart.
+        let mut installed_ids: Vec<String> = rivo_agent::info::mcp_servers(&cwd)
+            .into_iter().map(|s| s.name).collect();
+        installed_ids.extend(skills.iter().map(|s| s.name.clone()));
         Rivo {
             sessions: vec![session],
             selected: "s1".into(),
@@ -156,6 +177,12 @@ impl Rivo {
             model_search: TextEdit::new(""),
             connection_status: String::new(),
             testing: false,
+            marketplace_search: TextEdit::new(""),
+            registry_items: Vec::new(),
+            registry_status: String::new(),
+            registry_busy: false,
+            installed_ids,
+            registry_rx: None,
             model_config,
             agent_settings,
             skills,
@@ -307,9 +334,79 @@ impl Rivo {
     }
 
     pub fn choose_tab(&mut self, tab: SettingsTab) {
+        let marketplace = matches!(tab, SettingsTab::McpMarketplace | SettingsTab::SkillsMarketplace);
+        if marketplace && self.settings_tab != tab {
+            self.registry_items.clear();
+            self.registry_status.clear();
+        }
         self.settings_tab = tab;
         self.settings_select_open = None;
         self.connection_status.clear();
+        if marketplace && self.registry_items.is_empty() && !self.registry_busy {
+            self.search_registry();
+        }
+    }
+
+    /// Fetch the active marketplace in the background; never block the UI thread.
+    pub fn search_registry(&mut self) {
+        if self.registry_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.registry_rx = Some(rx);
+        self.registry_busy = true;
+        self.registry_status = "Searching…".into();
+        let mcp = self.settings_tab == SettingsTab::McpMarketplace;
+        let query = self.marketplace_search.text.trim().to_string();
+        thread::spawn(move || {
+            let result = if mcp {
+                registry::search_mcp(&query, 40).map(|items| {
+                    let note = if query.is_empty() {
+                        "Official MCP Registry · namespace-verified publishers · metadata only".to_string()
+                    } else {
+                        format!("Official MCP Registry · results for “{query}”")
+                    };
+                    RegistryResult::Found { items, note }
+                })
+            } else {
+                registry::search_skills(&query, 30).map(|items| {
+                    let note = "skills.sh · public GitHub skills with audits and install counts".to_string();
+                    RegistryResult::Found { items, note }
+                })
+            };
+            let _ = tx.send(result.unwrap_or_else(RegistryResult::Failed));
+        });
+    }
+
+    /// One-click install: writes an MCP config entry or downloads a skill into the workspace.
+    /// Runs on a worker thread and returns the refreshed skill list for the UI.
+    pub fn install_registry_item(&mut self, index: usize) {
+        if self.registry_busy {
+            return;
+        }
+        let Some(item) = self.registry_items.get(index).cloned() else { return };
+        if self.installed_ids.contains(&item.id) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.registry_rx = Some(rx);
+        self.registry_busy = true;
+        self.registry_status = format!("Installing {}…", item.name);
+        let cwd = self.current().cwd.clone();
+        thread::spawn(move || {
+            let result = if matches!(item.install, registry::InstallSpec::Skill { .. }) {
+                registry::install_skill(&cwd, &item).map(|message| RegistryResult::Installed {
+                    message,
+                    skills: rivo_agent::skills::discover(&cwd),
+                })
+            } else {
+                registry::install_mcp(&item).map(|message| RegistryResult::Installed {
+                    message,
+                    skills: rivo_agent::skills::discover(&cwd),
+                })
+            };
+            let _ = tx.send(result.unwrap_or_else(RegistryResult::Failed));
+        });
     }
 
     pub fn toggle_settings_select(&mut self, key: &str) {
@@ -726,6 +823,29 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
         s.last_info_refresh = clock;
         s.refresh_info();
     }
+    if let Some(rx) = &s.registry_rx {
+        if let Ok(result) = rx.try_recv() {
+            match result {
+                RegistryResult::Found { items, note } => {
+                    s.registry_items = items;
+                    s.registry_status = note;
+                }
+                RegistryResult::Installed { message, skills } => {
+                    s.skills = skills;
+                    if let Some(id) = s.registry_items.iter().find(|i| message.contains(&i.name)).map(|i| i.id.clone()) {
+                        if !s.installed_ids.contains(&id) { s.installed_ids.push(id); }
+                    }
+                    s.registry_status = message;
+                }
+                RegistryResult::Failed(message) => {
+                    s.registry_status = format!("Error: {message}");
+                }
+            }
+            s.registry_busy = false;
+            s.registry_rx = None;
+            changed = true;
+        }
+    }
     if let Some(rx) = &s.probe_rx {
         if let Ok(result) = rx.try_recv() {
             s.connection_status = match result {
@@ -737,7 +857,7 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
-    if s.busy() || s.testing {
+    if s.busy() || s.testing || s.registry_busy {
         tx.wake_after(ms(16));
     }
     if info_visible {
@@ -867,11 +987,65 @@ fn scene_settings(s: &mut Rivo) {
     s.connection_status = "Ready to connect — no API key needed.".into();
 }
 
+fn scene_marketplace(s: &mut Rivo) {
+    scene_settings(s);
+    s.settings_tab = SettingsTab::McpMarketplace;
+    s.registry_items = vec![
+        RegistryItem {
+            id: "io.github.example/filesystem".into(),
+            name: "Filesystem".into(),
+            description: "Read and write files inside a configured root directory.".into(),
+            publisher: "io.github.example".into(),
+            installs: 0,
+            verified: true,
+            install: registry::InstallSpec::Command {
+                program: "npx".into(),
+                args: vec!["-y".into(), "@example/mcp-filesystem".into()],
+                env: vec!["WORKSPACE_ROOT".into()],
+            },
+        },
+        RegistryItem {
+            id: "com.example/remote-search".into(),
+            name: "Remote Search".into(),
+            description: "Hosted web search over streamable HTTP.".into(),
+            publisher: "com.example".into(),
+            installs: 0,
+            verified: true,
+            install: registry::InstallSpec::Remote { url: "https://api.example.com/mcp".into() },
+        },
+    ];
+    s.registry_status = "Official MCP Registry · namespace-verified publishers".into();
+}
+
+fn scene_skill_marketplace(s: &mut Rivo) {
+    scene_settings(s);
+    s.settings_tab = SettingsTab::SkillsMarketplace;
+    s.registry_items = vec![RegistryItem {
+        id: "mattpocock/skills/code-review".into(),
+        name: "code-review".into(),
+        description: "911335 installs · mattpocock/skills".into(),
+        publisher: "mattpocock/skills".into(),
+        installs: 911_335,
+        verified: false,
+        install: registry::InstallSpec::Skill {
+            source: "mattpocock/skills".into(),
+            skill_id: "code-review".into(),
+        },
+    }];
+    s.registry_status = "skills.sh · public GitHub skills with audits and install counts".into();
+}
+
 fn main() {
     let spec = AppSpec {
         fonts: rune_theme_opencode::FONTS,
         families: rune_theme_opencode::FAMILIES,
-        scenes: &[("demo", scene_demo), ("streaming", scene_streaming), ("settings", scene_settings)],
+        scenes: &[
+            ("demo", scene_demo),
+            ("streaming", scene_streaming),
+            ("settings", scene_settings),
+            ("marketplace", scene_marketplace),
+            ("skill-marketplace", scene_skill_marketplace),
+        ],
         poll: Some(poll),
         on_key: Some(on_key),
         ..AppSpec::new("Rivo — native coding agent", (1160.0, 760.0), Rivo::new, view)

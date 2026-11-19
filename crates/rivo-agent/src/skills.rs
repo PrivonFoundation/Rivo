@@ -77,23 +77,35 @@ fn parse(path: &Path, text: &str) -> Option<Skill> {
     })
 }
 
+/// Agent Skills ship as a folder containing `SKILL.md`. Accept both that layout and a
+/// flat `name.md` file, one level deep at most.
 fn from_dir(dir: &Path, out: &mut Vec<Skill>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
+        if path.is_dir() {
+            let skill_file = path.join("SKILL.md");
+            if skill_file.is_file() {
+                add_skill(&skill_file, out);
+            }
+            continue;
+        }
         if !path.is_file() {
             continue;
         }
         let is_skill = path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md")
             || path.extension().and_then(|e| e.to_str()) == Some("md");
-        if !is_skill {
-            continue;
+        if is_skill {
+            add_skill(&path, out);
         }
-        if let Ok(text) = fs::read_to_string(&path) {
-            if let Some(skill) = parse(&path, &text) {
-                if !out.iter().any(|s| s.name == skill.name) {
-                    out.push(skill);
-                }
+    }
+}
+
+fn add_skill(path: &Path, out: &mut Vec<Skill>) {
+    if let Ok(text) = fs::read_to_string(path) {
+        if let Some(skill) = parse(path, &text) {
+            if !out.iter().any(|s| s.name == skill.name) {
+                out.push(skill);
             }
         }
     }

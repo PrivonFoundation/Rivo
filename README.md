@@ -55,6 +55,21 @@ You can also select it from the environment:
 RIVO_PROVIDER=kilo RIVO_MODEL=cohere/north-mini-code:free cargo run -p rivo-app --bin rivo
 ```
 
+## Marketplaces (MCP & skills)
+
+Settings has two extra tabs after **Model & context**, both free and without an API key:
+
+- **MCP Marketplace** searches the [official MCP Registry](https://registry.modelcontextprotocol.io)
+  (`GET /v0/servers?search=…`). Publishers verify a GitHub or DNS namespace. **Add** writes the
+  server entry to `~/.config/rivo/mcp.json`; it is picked up after a restart. The registry hosts
+  metadata only and does **not** scan server code — review a server before adding it.
+- **Skills Marketplace** searches [skills.sh](https://skills.sh) (`GET /api/search?q=…`) and shows
+  install counts plus the source repository. **Add** downloads the skill's text files into
+  `<workspace>/.rivo/skills/`; the agent discovers it immediately. Read `SKILL.md` before using it.
+
+Both searches and installs run on worker threads. Downloaded paths are confined to the skill
+folder, file counts and sizes are capped, and Rivo never executes a downloaded script itself.
+
 ## Other providers
 
 Rivo speaks the OpenAI chat-completions streaming protocol, so it works with OpenAI, OpenRouter,
