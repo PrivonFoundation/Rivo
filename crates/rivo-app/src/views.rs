@@ -420,10 +420,10 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     let busy = s.busy();
     let send = if busy {
-        IconButton::new(&STOP).variant(IconButtonVariant::GhostMuted).help("Stop")
+        IconButton::new(&STOP).variant(IconButtonVariant::GhostMuted).control_size(ControlSize::Large).help("Stop")
             .on_press(|s: &mut Rivo| s.stop()).build(k)
     } else {
-        IconButton::new(&SEND).variant(IconButtonVariant::Submit).help("Send message")
+        IconButton::new(&SEND).variant(IconButtonVariant::Submit).control_size(ControlSize::Large).help("Send message")
             .on_press(|s: &mut Rivo| s.submit()).build(k)
     };
     let usage = format!("~{} / {} context", format_tokens(s.context_used), format_tokens(s.context_window));
@@ -493,12 +493,13 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(body)
         .on_close(|s: &mut Rivo| s.close_model_picker())
         .build(k, layer);
-    col().key("composer").w_full().max_w(820.0)
-        .radius(k.radius.lg).border(1.0, c.border_base).fill(c.layer_01)
-        .padding(10.0).gap(8.0)
+    col().key("composer").w_full().max_w(880.0)
+        .radius(24.0).border(1.0, c.border_strong).fill(c.layer_02)
+        .shadow(4.0, 22.0, Color::BLACK.alpha(0.18))
+        .padding(14.0).gap(10.0)
         .child(TextArea::new(&s.draft)
             .placeholder("Type a message — / for commands, @ for skills or files…")
-            .label("Message").width(None).rows(2).auto_grow(2, 6).max_height(150.0)
+            .label("Message").width(None).rows(2).auto_grow(2, 6).max_height(160.0)
             .on_edit(|s: &mut Rivo| &mut s.draft)
             .on_submit(|s: &mut Rivo, _| s.submit()).build(k))
         .child(row().justify_between().center_y()
@@ -506,7 +507,7 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(model_picker)
                 .child(text(usage).font(k.ty.small).color(c.text_faint)))
             .child(row().gap(6.0).center_y()
-                .child(IconButton::new(&PLUS).variant(IconButtonVariant::GhostMuted).help("Skills")
+                .child(IconButton::new(&PLUS).variant(IconButtonVariant::GhostMuted).control_size(ControlSize::Small).help("Skills")
                     .on_press(|s: &mut Rivo| { s.settings_tab = SettingsTab::Skills; s.open_settings(); }).build(k))
                 .child(send)))
 }
