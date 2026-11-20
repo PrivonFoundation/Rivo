@@ -16,6 +16,7 @@ use std::time::Duration;
 use rivo_agent::{
     AgentSettings, ChatInput, Event, EventKind, KILO_FREE_MODELS, Message, ModelConfig,
     PermissionMode, Preset, Protocol, ProviderConfig, Role, RunConfig, Session, Skill, TokenUsage,
+    catalog::{self, CatalogModel, Category},
     context, info::{McpServer, ModifiedFile},
     registry::{self, RegistryItem},
 };
@@ -29,7 +30,6 @@ pub const PROJECTS: [(&str, f32); 4] = [("rivo", 22.0), ("rune", 250.0), ("site"
 pub enum SettingsTab {
     Provider,
     Connection,
-    Model,
     McpMarketplace,
     SkillsMarketplace,
     Skills,
@@ -98,6 +98,13 @@ pub struct Rivo {
     pub registry_busy: bool,
     pub installed_ids: Vec<String>,
     registry_rx: Option<mpsc::Receiver<RegistryResult>>,
+    // models.dev catalog (all model + context config lives in the Providers tab)
+    pub catalog_models: Vec<CatalogModel>,
+    pub catalog_query: TextEdit,
+    pub catalog_category: Category,
+    pub catalog_status: String,
+    pub catalog_busy: bool,
+    catalog_rx: Option<mpsc::Receiver<Result<Vec<CatalogModel>, String>>>,
     // Agent configuration
     pub model_config: ModelConfig,
     pub agent_settings: AgentSettings,
@@ -183,6 +190,12 @@ impl Rivo {
             registry_busy: false,
             installed_ids,
             registry_rx: None,
+            catalog_models: Vec::new(),
+            catalog_query: TextEdit::new(""),
+            catalog_category: Category::All,
+            catalog_status: String::new(),
+            catalog_busy: false,
+            catalog_rx: None,
             model_config,
             agent_settings,
             skills,
@@ -345,6 +358,54 @@ impl Rivo {
         if marketplace && self.registry_items.is_empty() && !self.registry_busy {
             self.search_registry();
         }
+        if tab == SettingsTab::Connection && self.catalog_models.is_empty() && !self.catalog_busy {
+            self.load_catalog();
+        }
+    }
+
+    /// Fetch models.dev (~7 MB, 324 providers) on a worker thread; cached for 24 hours.
+    pub fn load_catalog(&mut self) {
+        if self.catalog_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.catalog_rx = Some(rx);
+        self.catalog_busy = true;
+        self.catalog_status = "Loading models.dev catalog…".into();
+        thread::spawn(move || {
+            let _ = tx.send(catalog::load());
+        });
+    }
+
+    pub fn set_catalog_category(&mut self, category: Category) {
+        self.catalog_category = category;
+    }
+
+    /// Apply a models.dev entry: protocol, endpoint, model id, context and output limits.
+    /// The API key is taken from the environment variable named by the provider when present.
+    pub fn use_catalog_model(&mut self, index: usize) {
+        let query = self.catalog_query.text.clone();
+        let category = self.catalog_category;
+        let Some(model) = catalog::filter(&self.catalog_models, &query, category).get(index).map(|m| (*m).clone()) else { return };
+        let key = if model.env.is_empty() { String::new() } else {
+            std::env::var(&model.env).unwrap_or_default()
+        };
+        self.config = ProviderConfig::custom(model.base_url.clone(), key, model.id.clone());
+        self.settings_preset = Preset::Custom;
+        self.model_config.protocol = model.protocol;
+        self.model_config.base_hint = model.base_url.clone();
+        self.model_config.context_window = model.context.max(4_096);
+        self.model_config.max_output = model.max_output.clamp(256, 131_072);
+        let used = context::conversation_tokens(&self.current().messages);
+        self.base_url = TextEdit::new(self.config.base_url.clone());
+        self.api_key = TextEdit::new(self.config.api_key.clone());
+        self.model_name = TextEdit::new(self.config.model.clone());
+        self.context_window_edit = TextEdit::new(self.model_config.context_window.to_string());
+        self.max_output_edit = TextEdit::new(self.model_config.max_output.to_string());
+        self.context_window = self.model_config.context_window;
+        self.context_used = used;
+        self.connection_status = format!("Using {} · {}", model.provider_name, model.name);
+        save_config(&self.config, &self.model_config, &self.agent_settings);
     }
 
     /// Fetch the active marketplace in the background; never block the UI thread.
@@ -826,6 +887,24 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
         s.last_info_refresh = clock;
         s.refresh_info();
     }
+    if let Some(rx) = &s.catalog_rx {
+        if let Ok(result) = rx.try_recv() {
+            match result {
+                Ok(models) => {
+                    let count = models.len();
+                    let providers = models.iter().map(|m| m.provider.as_str()).collect::<std::collections::HashSet<_>>().len();
+                    s.catalog_status = format!("{count} models from {providers} providers · models.dev · cached for 24h");
+                    s.catalog_models = models;
+                }
+                Err(message) => {
+                    s.catalog_status = format!("Could not load models.dev: {message}");
+                }
+            }
+            s.catalog_busy = false;
+            s.catalog_rx = None;
+            changed = true;
+        }
+    }
     if let Some(rx) = &s.registry_rx {
         if let Ok(result) = rx.try_recv() {
             match result {
@@ -860,7 +939,7 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
-    if s.busy() || s.testing || s.registry_busy {
+    if s.busy() || s.testing || s.registry_busy || s.catalog_busy {
         tx.wake_after(ms(16));
     }
     if info_visible {
@@ -990,6 +1069,33 @@ fn scene_settings(s: &mut Rivo) {
     s.connection_status = "Ready to connect — no API key needed.".into();
 }
 
+fn scene_providers(s: &mut Rivo) {
+    scene_settings(s);
+    s.settings_tab = SettingsTab::Connection;
+    s.catalog_category = Category::Free;
+    s.catalog_status = "250 models from 84 providers · models.dev · cached for 24h".into();
+    s.catalog_models = vec![
+        CatalogModel {
+            id: "cohere/north-mini-code:free".into(), name: "Cohere North Mini Code".into(),
+            description: "Tuned for code. A good default for this agent.".into(),
+            provider: "kilo".into(), provider_name: "Kilo Gateway".into(),
+            base_url: rivo_agent::KILO_BASE_URL.into(), env: String::new(),
+            protocol: rivo_agent::Protocol::OpenAiCompatible, context: 256_000, max_output: 4096,
+            input_cost: 0.0, output_cost: 0.0, free: true, tool_call: true,
+            reasoning: false, open_weights: false,
+        },
+        CatalogModel {
+            id: "qwen/qwen3-coder:free".into(), name: "Qwen3 Coder".into(),
+            description: "Open-weight coding model with tool calling.".into(),
+            provider: "openrouter".into(), provider_name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(), env: "OPENROUTER_API_KEY".into(),
+            protocol: rivo_agent::Protocol::OpenAiCompatible, context: 262_144, max_output: 8192,
+            input_cost: 0.0, output_cost: 0.0, free: true, tool_call: true,
+            reasoning: true, open_weights: true,
+        },
+    ];
+}
+
 fn scene_marketplace(s: &mut Rivo) {
     scene_settings(s);
     s.settings_tab = SettingsTab::McpMarketplace;
@@ -1046,6 +1152,7 @@ fn main() {
             ("demo", scene_demo),
             ("streaming", scene_streaming),
             ("settings", scene_settings),
+            ("providers", scene_providers),
             ("marketplace", scene_marketplace),
             ("skill-marketplace", scene_skill_marketplace),
         ],

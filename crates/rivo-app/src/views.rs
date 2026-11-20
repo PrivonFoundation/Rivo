@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 use rivo_agent::{
     KILO_FREE_MODELS, Message, PermissionMode, Preset, Protocol, Role, ToolCall, info,
+    catalog::Category,
     registry::InstallSpec,
 };
 use rune::{Color, El, Icon, col, el, icon, row, text};
@@ -586,8 +587,10 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let current_model = KILO_FREE_MODELS
         .iter()
         .find(|m| m.id == s.config.model)
-        .map(|m| m.name)
-        .unwrap_or(s.config.model.as_str());
+        .map(|m| m.name.to_string())
+        .or_else(|| s.catalog_models.iter().find(|m| m.id == s.config.model).map(|m| m.name.clone()))
+        .unwrap_or_else(|| s.config.model.clone());
+    let current_model = current_model.as_str();
     let model_trigger = Button::new(format!("{current_model}  ⌄"))
         .variant(ButtonVariant::Ghost)
         .control_size(ControlSize::Small)
@@ -695,8 +698,10 @@ fn short_path(path: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-fn model_label(name: &str) -> String {
-    KILO_FREE_MODELS.iter().find(|m| m.id == name).map(|m| m.name).unwrap_or(name).to_string()
+fn model_label(s: &Rivo, name: &str) -> String {
+    KILO_FREE_MODELS.iter().find(|m| m.id == name).map(|m| m.name.to_string())
+        .or_else(|| s.catalog_models.iter().find(|m| m.id == name).map(|m| m.name.clone()))
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn metric_row(k: &Kit, label: &str, value: String) -> El {
@@ -830,7 +835,7 @@ pub fn inspector(s: &Rivo, k: &Kit) -> El {
                     let stat_cost = info::cost_usd(&stat.name, &stat.usage);
                     body = body.child(row().w_full().min_h(26.0).padding(4.0).gap(4.0).center_y().hover(c.hover)
                         .child(col().grow(1.0).min_w(0.0)
-                            .child(text(model_label(&stat.name)).font(k.ty.ui_compact).color(c.text_base).truncate()))
+                            .child(text(model_label(s, &stat.name)).font(k.ty.ui_compact).color(c.text_base).truncate()))
                         .child(text(stat.steps.to_string()).font(k.ty.mono).color(c.text_muted).w(36.0))
                         .child(text(money(stat_cost)).font(k.ty.mono).color(c.text_muted).w(46.0)));
                 }
@@ -905,7 +910,6 @@ fn settings_nav(s: &Rivo, k: &Kit) -> El {
         .child(text("SETTINGS").font(k.ty.small_medium).color(k.c.text_faint).pl(9.0).pb(6.0))
         .child(settings_nav_item(s, k, "General", SettingsTab::Provider, &SETTINGS))
         .child(settings_nav_item(s, k, "Providers", SettingsTab::Connection, &SEARCH))
-        .child(settings_nav_item(s, k, "Model & context", SettingsTab::Model, &GRID))
         .child(settings_nav_item(s, k, "MCP Marketplace", SettingsTab::McpMarketplace, &STORE))
         .child(settings_nav_item(s, k, "Skills Marketplace", SettingsTab::SkillsMarketplace, &STORE))
         .child(settings_nav_item(s, k, "Skills", SettingsTab::Skills, &CHECK))
@@ -970,28 +974,6 @@ fn toggle_switch<F: Fn(&mut Rivo) + 'static>(k: &Kit, on: bool, press: F) -> El 
 
 fn general_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let mut presets: Vec<String> = vec!["Mock provider".into(), "Kilo Code — free".into(), "Custom endpoint".into()];
-    let current_preset = match s.settings_preset {
-        Preset::Mock => &presets[0],
-        Preset::KiloFree => &presets[1],
-        Preset::Custom => &presets[2],
-    }.clone();
-    let preset = select_box(s, k, layer, "preset-select", &presets, &current_preset, |s, v| {
-        s.choose_preset(match v {
-            "Kilo Code — free" => Preset::KiloFree,
-            "Custom endpoint" => Preset::Custom,
-            _ => Preset::Mock,
-        });
-    });
-    presets.clear();
-
-    let models: Vec<String> = KILO_FREE_MODELS.iter().map(|m| m.id.to_string()).collect();
-    let model = select_box(s, k, layer, "model-select", &models, &s.config.model, |s, v| {
-        if let Some(i) = KILO_FREE_MODELS.iter().position(|m| m.id == v) {
-            s.choose_free_model(i);
-        }
-    });
-
     let permissions: Vec<String> = vec![PermissionMode::Auto.label().to_string(), PermissionMode::ReadOnly.label().to_string()];
     let permission = select_box(s, k, layer, "permission-select", &permissions, s.agent_settings.permission.label(), |s, v| {
         s.set_permission(if v.starts_with("Read") { PermissionMode::ReadOnly } else { PermissionMode::Auto });
@@ -1013,11 +995,11 @@ fn general_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(select_box(s, k, layer, "env-select", &["All workspaces".into(), "Current workspace".into()], "All workspaces", |_, _| {})),
         )
         .child(card(k, "Agent defaults", vec![
-            setting_row(k, "Provider", "How Rivo reaches the model.", preset),
-            setting_row(k, "Model", "The model used for new turns and tool calls.", model),
             setting_row(k, "Permissions", "Read-only blocks writes and commands.", permission),
-            setting_row(k, "Auto-compact context", "Fold old turns into a marker when the window fills up.",
-                toggle_switch(k, s.agent_settings.auto_compact, |s| s.agent_settings.auto_compact = !s.agent_settings.auto_compact)),
+            setting_row(k, "Provider & model", "Endpoint, protocol, model, context and instructions are configured under Providers.",
+                Button::new("Open Providers").variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut Rivo| s.choose_tab(SettingsTab::Connection)).build(k)),
         ]))
         .child(card(k, "Appearance", vec![
             setting_row(k, "Theme", "Follow the system or pick one appearance.", theme),
@@ -1040,31 +1022,7 @@ fn provider_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         s.choose_preset(match v { "Kilo Code — free" => Preset::KiloFree, "Custom endpoint" => Preset::Custom, _ => Preset::Mock });
     });
     presets.clear();
-    col().w_full().gap(18.0)
-        .child(text("Provider").font(rune::tok::type_::TITLE).color(c.text_base))
-        .child(card(k, "Connection", vec![
-            setting_row(k, "Provider", "Mock runs offline; Kilo's free gateway needs no API key.", preset),
-            setting_row(k, "Base URL", "OpenAI-compatible endpoint or Kilo gateway.",
-                rune_kit::TextInput::new(&s.base_url).width(Some(260.0)).on_edit(|s: &mut Rivo| &mut s.base_url).build(k)),
-            setting_row(k, "API key", "Not needed for the free gateway or local models.",
-                rune_kit::TextInput::new(&s.api_key).width(Some(260.0)).on_edit(|s: &mut Rivo| &mut s.api_key).build(k)),
-            setting_row(k, "Model", "Model id sent with each request.",
-                rune_kit::TextInput::new(&s.model_name).width(Some(260.0)).on_edit(|s: &mut Rivo| &mut s.model_name).build(k)),
-            setting_row(k, "Test connection", "Checks the /models endpoint from a worker thread.",
-                Button::new("Test").variant(ButtonVariant::Ghost).control_size(ControlSize::Regular)
-                    .on_press(|s: &mut Rivo| s.test_connection()).build(k)),
-        ]))
-        .child(
-            col().w_full().gap(5.0).padding(12.0).radius(k.radius.md)
-                .fill(c.warning.bg).border(1.0, c.warning.border)
-                .child(text("Free tier notice").font(k.ty.ui_medium).color(c.warning.fg))
-                .child(text("200 requests/hour per IP. Auto Free and some providers may log prompts for training — don't send confidential code. NVIDIA endpoints are trial use only.")
-                    .font(k.ty.small).color(c.warning.fg).wrap()),
-        )
-}
 
-fn model_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
-    let c = &k.c;
     let protocols: Vec<String> = Protocol::all().iter().map(|p| p.label().to_string()).collect();
     let protocol = select_box(s, k, layer, "protocol-select", &protocols, s.model_config.protocol.label(), |s, v| {
         let p = match v {
@@ -1074,31 +1032,104 @@ fn model_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         };
         s.set_protocol(p);
     });
+
+    let filtered = rivo_agent::catalog::filter(&s.catalog_models, &s.catalog_query.text, s.catalog_category);
+    let search = TextInput::new(&s.catalog_query)
+        .placeholder("Search 324 providers and 10k models…")
+        .label("Search models.dev catalog")
+        .width(Some(340.0))
+        .leading_icon(k.glyph.search)
+        .on_edit(|s: &mut Rivo| &mut s.catalog_query)
+        .build(k);
+    let refresh = Button::new(if s.catalog_busy { "Loading…" } else { "Refresh" })
+        .variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+        .on_press(|s: &mut Rivo| s.load_catalog()).build(k);
+    let categories = row().w_full().gap(3.0).wrap().child(
+        Category::all().into_iter().fold(row().gap(3.0).wrap(), |r, cat| {
+            let active = s.catalog_category == cat;
+            let mut pill = row().padding(6.0).radius(k.radius.sm).center()
+                .on_press(move |s: &mut Rivo| s.set_catalog_category(cat));
+            if active { pill = pill.fill(c.layer_03); } else { pill = pill.hover(c.hover); }
+            r.child(pill.child(text(cat.label()).font(k.ty.small)
+                .color(if active { c.text_base } else { c.text_muted })))
+        }));
+    let mut catalog_rows = Vec::new();
+    for (i, m) in filtered.iter().take(40).enumerate() {
+        let cost = if m.free { "free".to_string() } else { format!("${:.2}/${:.2} per 1M", m.input_cost, m.output_cost) };
+        let meta = format!("{}  ·  {}  ·  {} ctx  ·  {}", m.provider_name, m.protocol.label(), format_tokens(m.context), cost);
+        catalog_rows.push(row().w_full().min_h(52.0).padding(10.0).gap(12.0).center_y().justify_between()
+            .child(col().grow(1.0).min_w(0.0).gap(3.0)
+                .child(text(m.name.clone()).font(k.ty.ui_compact).color(c.text_base).truncate())
+                .child(text(meta).font(k.ty.small).color(c.text_muted).truncate())
+                .child(text(if m.description.is_empty() { m.id.clone() } else { m.description.clone() })
+                    .font(k.ty.small).color(c.text_faint).truncate()))
+            .child(Button::new("Use").variant(ButtonVariant::Contrast).control_size(ControlSize::Small)
+                .on_press(move |s: &mut Rivo| s.use_catalog_model(i)).build(k)));
+    }
+    if catalog_rows.is_empty() {
+        catalog_rows.push(row().w_full().padding(10.0).child(text(
+            if s.catalog_busy { "Loading catalog…" } else { "No models match this filter." }
+        ).font(k.ty.small).color(c.text_muted)));
+    }
+    let catalog_status = if s.catalog_status.is_empty() {
+        "models.dev — free, open-source catalog; no API key needed.".to_string()
+    } else {
+        format!("{}  ·  showing {} of {}", s.catalog_status, filtered.len().min(40), filtered.len())
+    };
+
+    let kilo_models: Vec<String> = KILO_FREE_MODELS.iter().map(|m| m.id.to_string()).collect();
+    let kilo_model = select_box(s, k, layer, "kilo-model-select", &kilo_models, &s.config.model, |s, v| {
+        if let Some(i) = KILO_FREE_MODELS.iter().position(|m| m.id == v) {
+            s.choose_free_model(i);
+        }
+    });
+
     col().w_full().gap(18.0)
-        .child(text("Model & context").font(rune::tok::type_::TITLE).color(c.text_base))
-        .child(card(k, "Model", vec![
+        .child(text("Providers").font(rune::tok::type_::TITLE).color(c.text_base))
+        .child(card(k, "Connection", vec![
+            setting_row(k, "Provider", "Mock runs offline; Kilo's free gateway needs no API key.", preset),
+            setting_row(k, "Base URL", "Endpoint used for this provider.",
+                rune_kit::TextInput::new(&s.base_url).label("Base URL").width(Some(260.0)).on_edit(|s: &mut Rivo| &mut s.base_url).build(k)),
+            setting_row(k, "API key", "Read from the provider's environment variable when one is available.",
+                rune_kit::TextInput::new(&s.api_key).label("API key").width(Some(260.0)).on_edit(|s: &mut Rivo| &mut s.api_key).build(k)),
+            setting_row(k, "Model", "Model id sent with each request.",
+                rune_kit::TextInput::new(&s.model_name).label("Model").width(Some(260.0)).on_edit(|s: &mut Rivo| &mut s.model_name).build(k)),
             setting_row(k, "Wire protocol", "OpenAI, Anthropic Messages or Google Gemini.", protocol),
-            setting_row(k, "Suggested base URL", &s.model_config.base_hint,
-                text(s.model_config.base_hint.clone()).font(k.ty.mono).color(c.text_muted).truncate()),
-            setting_row(k, "Temperature", "Lower is more deterministic (0 – 2).",
-                rune_kit::TextInput::new(&s.temperature_edit).width(Some(120.0)).on_edit(|s: &mut Rivo| &mut s.temperature_edit).build(k)),
-            setting_row(k, "Max output", "Maximum tokens generated per reply.",
-                rune_kit::TextInput::new(&s.max_output_edit).width(Some(120.0)).on_edit(|s: &mut Rivo| &mut s.max_output_edit).build(k)),
+            setting_row(k, "Test connection", "Checks the /models endpoint from a worker thread.",
+                Button::new("Test").variant(ButtonVariant::Ghost).control_size(ControlSize::Regular)
+                    .on_press(|s: &mut Rivo| s.test_connection()).build(k)),
         ]))
-        .child(card(k, "Context window", vec![
-            setting_row(k, "Window size", "Tokens kept in the conversation before compaction.",
-                rune_kit::TextInput::new(&s.context_window_edit).width(Some(140.0)).on_edit(|s: &mut Rivo| &mut s.context_window_edit).build(k)),
+        .child(col().w_full().gap(10.0)
+            .child(row().w_full().gap(8.0).center_y().child(search).child(refresh))
+            .child(categories)
+            .child(text(catalog_status).font(k.ty.small).color(c.text_muted).wrap())
+            .child(card(k, "models.dev catalog — click Use to configure", catalog_rows)))
+        .child(card(k, "Kilo Gateway (kept)", vec![
+            setting_row(k, "Free model", "200 requests/hour per IP, no API key.", kilo_model),
+        ]))
+        .child(card(k, "Model & context", vec![
+            setting_row(k, "Temperature", "Lower is more deterministic (0 – 2).",
+                rune_kit::TextInput::new(&s.temperature_edit).label("Temperature").width(Some(120.0)).on_edit(|s: &mut Rivo| &mut s.temperature_edit).build(k)),
+            setting_row(k, "Max output", "Maximum tokens generated per reply.",
+                rune_kit::TextInput::new(&s.max_output_edit).label("Max output").width(Some(120.0)).on_edit(|s: &mut Rivo| &mut s.max_output_edit).build(k)),
+            setting_row(k, "Context window", "Tokens kept before compaction.",
+                rune_kit::TextInput::new(&s.context_window_edit).label("Context window").width(Some(140.0)).on_edit(|s: &mut Rivo| &mut s.context_window_edit).build(k)),
             setting_row(k, "Auto-compact", "Fold old turns into a short marker.",
                 toggle_switch(k, s.agent_settings.auto_compact, |s| s.agent_settings.auto_compact = !s.agent_settings.auto_compact)),
             setting_row(k, "Recent messages", "How many turns stay untouched when compacting.",
                 text(s.agent_settings.keep_recent.to_string()).font(k.ty.ui).color(c.text_muted)),
             setting_row(k, "Current usage", "Estimated from the active session.",
-                text(format!("~{} / {} tokens", s.context_used, s.context_window)).font(k.ty.ui).color(c.text_muted)),
-        ]))
-        .child(card(k, "Instructions", vec![
+                text(format!("~{} / {} tokens", format_tokens(s.context_used), format_tokens(s.context_window))).font(k.ty.ui).color(c.text_muted)),
             setting_row(k, "System prompt", "Extra instructions appended to every request.",
-                rune_kit::TextInput::new(&s.system_prompt).width(Some(300.0)).on_edit(|s: &mut Rivo| &mut s.system_prompt).build(k)),
+                rune_kit::TextInput::new(&s.system_prompt).label("System prompt").width(Some(300.0)).on_edit(|s: &mut Rivo| &mut s.system_prompt).build(k)),
         ]))
+        .child(
+            col().w_full().gap(5.0).padding(12.0).radius(k.radius.md)
+                .fill(c.warning.bg).border(1.0, c.warning.border)
+                .child(text("Free tier notice").font(k.ty.ui_medium).color(c.warning.fg))
+                .child(text("Free and open-weight models may log prompts for training — don't send confidential code. Check each provider's terms before use.")
+                    .font(k.ty.small).color(c.warning.fg).wrap()),
+        )
 }
 
 fn install_hint(spec: &InstallSpec) -> String {
@@ -1240,7 +1271,6 @@ pub fn settings_page(s: &Rivo, k: &Kit, inset: f32) -> El {
     let panel = match s.settings_tab {
         SettingsTab::Provider => general_panel(s, k, &mut layer),
         SettingsTab::Connection => provider_panel(s, k, &mut layer),
-        SettingsTab::Model => model_panel(s, k, &mut layer),
         SettingsTab::McpMarketplace | SettingsTab::SkillsMarketplace => marketplace_panel(s, k),
         SettingsTab::Skills => skills_panel(s, k),
         SettingsTab::Tools => tools_panel(s, k),
