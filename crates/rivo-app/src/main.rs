@@ -812,10 +812,13 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
     }
     if let Some(rx) = &s.info_rx {
         if let Ok(snapshot) = rx.try_recv() {
+            // A periodic refresh usually returns the same facts; only a real difference
+            // should ask Rune to redraw (see the idle-poll perf warning).
+            let differs = s.modified_files != snapshot.files || s.mcp_servers != snapshot.mcp;
             s.modified_files = snapshot.files;
             s.mcp_servers = snapshot.mcp;
             s.info_rx = None;
-            changed = true;
+            changed |= differs;
         }
     }
     let info_visible = s.inspector.is_open() && s.inspector_tab == InspectorTab::Info;
