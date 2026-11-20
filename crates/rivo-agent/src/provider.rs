@@ -18,7 +18,13 @@ pub enum StreamEvent {
 }
 
 pub trait Provider: Send + Sync {
-    fn chat(&self, run: &RunConfig, messages: &[Message], emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String>;
+    fn chat(
+        &self,
+        run: &RunConfig,
+        messages: &[Message],
+        tools: &[Box<dyn crate::tools::Tool>],
+        emit: &mut dyn FnMut(StreamEvent),
+    ) -> Result<(), String>;
 }
 
 /// A lightweight connection check used by the settings screen. Runs on a worker thread.
@@ -75,9 +81,14 @@ pub fn make(run: &RunConfig) -> Box<dyn Provider> {
 
 struct RemoteProvider;
 impl Provider for RemoteProvider {
-    fn chat(&self, run: &RunConfig, messages: &[Message], emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String> {
-        let tools = crate::tools::all_tools();
-        protocol::chat(&run.provider, &run.model, run, messages, &tools, emit)
+    fn chat(
+        &self,
+        run: &RunConfig,
+        messages: &[Message],
+        tools: &[Box<dyn crate::tools::Tool>],
+        emit: &mut dyn FnMut(StreamEvent),
+    ) -> Result<(), String> {
+        protocol::chat(&run.provider, &run.model, run, messages, tools, emit)
     }
 }
 
@@ -86,7 +97,13 @@ impl Provider for RemoteProvider {
 struct MockProvider;
 
 impl Provider for MockProvider {
-    fn chat(&self, _run: &RunConfig, messages: &[Message], emit: &mut dyn FnMut(StreamEvent)) -> Result<(), String> {
+    fn chat(
+        &self,
+        _run: &RunConfig,
+        messages: &[Message],
+        _tools: &[Box<dyn crate::tools::Tool>],
+        emit: &mut dyn FnMut(StreamEvent),
+    ) -> Result<(), String> {
         let last_user = messages.iter().rev().find(|m| m.role == Role::User).map(|m| m.text.clone()).unwrap_or_default();
         let lower = last_user.to_lowercase();
         let last_was_tools = messages.last().is_some_and(|m| {

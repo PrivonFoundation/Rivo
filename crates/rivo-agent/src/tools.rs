@@ -24,7 +24,7 @@ impl ToolContext {
         Self { workspace, permission, skills }
     }
 
-    fn writable(&self) -> Result<(), String> {
+    pub(crate) fn writable(&self) -> Result<(), String> {
         match self.permission {
             PermissionMode::Auto => Ok(()),
             PermissionMode::ReadOnly => Err("read-only mode: switch to Auto in Settings to write files or run commands".into()),
@@ -40,7 +40,7 @@ pub trait Tool: Send + Sync {
 }
 
 pub fn all_tools() -> Vec<Box<dyn Tool>> {
-    vec![
+    let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ListDir),
         Box::new(ReadFile),
         Box::new(WriteFile),
@@ -56,7 +56,9 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(MemoryWrite),
         Box::new(MemoryRead),
         Box::new(RunCommand),
-    ]
+    ];
+    tools.extend(crate::tools_extra::all());
+    tools
 }
 
 pub fn openai_specs(tools: &[Box<dyn Tool>]) -> Value {
@@ -79,7 +81,7 @@ pub fn openai_specs(tools: &[Box<dyn Tool>]) -> Value {
 
 /// Resolve a relative path inside the workspace, rejecting `..`, absolute paths and symlinks
 /// that point out of the workspace.
-fn safe_path(ctx: &ToolContext, raw: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_path(ctx: &ToolContext, raw: &str) -> Result<PathBuf, String> {
     if raw.is_empty() {
         return Err("path is empty".into());
     }
@@ -116,14 +118,14 @@ fn safe_path(ctx: &ToolContext, raw: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-fn arg_str(args: &Value, key: &str) -> Result<String, String> {
+pub(crate) fn arg_str(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("missing string argument `{key}`"))
 }
 
-fn truncate(s: String, max: usize) -> String {
+pub(crate) fn truncate(s: String, max: usize) -> String {
     if s.chars().count() <= max {
         return s;
     }
@@ -257,7 +259,7 @@ impl Tool for Search {
     }
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+pub(crate) fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     if depth > 8 {
         return;
     }
@@ -276,6 +278,23 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     }
 }
 
+/// Parse and validate a command line: no shell metacharacters, allowlisted program.
+pub(crate) fn command_parts(command: &str) -> Result<Vec<String>, String> {
+    let bad = [';', '&', '|', '>', '<', '$', '`', '\n', '\r', '(', ')', '{', '}', '\\'];
+    if command.chars().any(|c| bad.contains(&c)) {
+        return Err("shell metacharacters are not allowed".into());
+    }
+    let parts: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+    let Some(program) = parts.first() else { return Err("empty command".into()) };
+    const ALLOW: &[&str] = &[
+        "cargo", "git", "ls", "pwd", "cat", "rg", "find", "rustc", "node", "python3", "uname", "echo", "printf",
+    ];
+    if !ALLOW.contains(&program.as_str()) {
+        return Err(format!("{program} is not on the allowlist"));
+    }
+    Ok(parts)
+}
+
 struct RunCommand;
 impl Tool for RunCommand {
     fn name(&self) -> &'static str { "run_command" }
@@ -290,20 +309,9 @@ impl Tool for RunCommand {
     fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<String, String> {
         ctx.writable()?;
         let command = arg_str(args, "command")?;
-        let bad = [';', '&', '|', '>', '<', '$', '`', '\n', '\r', '(', ')', '{', '}', '\\'];
-        if command.chars().any(|c| bad.contains(&c)) {
-            return Err("shell metacharacters are not allowed".into());
-        }
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        let Some(program) = parts.first() else { return Err("empty command".into()) };
-        const ALLOW: &[&str] = &[
-            "cargo", "git", "ls", "pwd", "cat", "rg", "find", "rustc", "node", "python3", "uname", "echo", "printf",
-        ];
-        if !ALLOW.contains(program) {
-            return Err(format!("{program} is not on the allowlist"));
-        }
+        let parts = command_parts(&command)?;
         let root = ctx.workspace.canonicalize().map_err(|e| e.to_string())?;
-        let mut child = Command::new(program)
+        let mut child = Command::new(&parts[0])
             .args(&parts[1..])
             .current_dir(&root)
             .stdout(Stdio::piped())
@@ -361,7 +369,7 @@ impl Tool for Glob {
 }
 
 /// Small glob matcher: `*` doesn't cross `/`, `**` does, `?` matches one char.
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     fn go(p: &[u8], t: &[u8]) -> bool {
         if p.is_empty() { return t.is_empty(); }
         if p[0] == b'*' {
@@ -409,7 +417,7 @@ impl Tool for EditFile {
     }
 }
 
-fn git(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
     let root = ctx.workspace.canonicalize().map_err(|e| e.to_string())?;
     let out = Command::new("git").args(args).current_dir(&root).output().map_err(|e| format!("git failed: {e}"))?;
     let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -514,8 +522,12 @@ impl Tool for TodoWrite {
     fn execute(&self, _: &ToolContext, args: &Value) -> Result<String, String> {
         let items = args.get("items").and_then(Value::as_array).ok_or("items must be an array")?;
         let mut out = String::from("Plan:\n");
+        let mut state = crate::tools_extra::todo_state().lock().map_err(|e| e.to_string())?;
+        state.clear();
         for (i, item) in items.iter().enumerate() {
-            out.push_str(&format!("  [ ] {}. {}\n", i + 1, item.as_str().unwrap_or("")));
+            let text = item.as_str().unwrap_or("").to_string();
+            out.push_str(&format!("  [ ] {}. {}\n", i + 1, text));
+            state.push(text);
         }
         Ok(out)
     }
@@ -590,5 +602,14 @@ mod tests {
         let c = ctx();
         assert!(safe_path(&c, "/etc/passwd").is_err());
         assert!(safe_path(&c, "../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn tool_catalog_has_fifty_unique_tools() {
+        let tools = all_tools();
+        assert_eq!(tools.len(), 50);
+        let mut names: Vec<_> = tools.iter().map(|t| t.name()).collect();
+        names.sort_unstable();
+        assert!(names.windows(2).all(|w| w[0] != w[1]), "duplicate tool names");
     }
 }

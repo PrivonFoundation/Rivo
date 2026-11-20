@@ -11,6 +11,7 @@ pub mod registry;
 pub mod settings;
 pub mod skills;
 pub mod tools;
+mod tools_extra;
 
 pub use model::{
     ChatInput, Event, EventKind, FreeModel, Message, Preset, Protocol, ProviderConfig, ProviderKind,

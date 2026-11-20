@@ -68,7 +68,7 @@ fn execute(
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut index = 0usize;
 
-        let result = provider.chat(&run, &history, &mut |ev| {
+        let result = provider.chat(&run, &history, &tools, &mut |ev| {
             if cancel.load(Ordering::Relaxed) { return; }
             match ev {
                 StreamEvent::Delta(text) => {

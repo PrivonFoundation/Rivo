@@ -18,7 +18,7 @@ No API key? Rivo starts on a local mock provider that streams replies and calls 
 
 ## Main features
 
-- **15 tools** — read/write/edit files, glob & search, git status/diff/log, allowlisted commands, web fetch, durable memory, skills and todos. Every call is shown in the transcript.
+- **50 tools** — files (read/write/edit/copy/move/delete, patch, diff), search (glob, grep, symbols), git (status/diff/log, branch, commit, stash, blame, …), commands (allowlisted + background tasks), web (fetch, search, download) and session (todos, memory, skills). Every call is shown in the transcript; toggle individual tools in the inspector.
 - **3 protocols** — OpenAI-compatible, Anthropic Messages and Google Gemini, switchable in Settings.
 - **Free models** — Kilo Code gateway with 14 tool-capable free models, no API key or card (200 req/hour per IP).
 - **MCP & Skills marketplaces** — find and add servers from the official MCP Registry and skills from skills.sh, right from Settings.
