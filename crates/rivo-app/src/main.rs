@@ -17,6 +17,7 @@ use rivo_agent::{
     AgentSettings, ChatInput, Event, EventKind, KILO_FREE_MODELS, Message, ModelConfig,
     PermissionMode, Preset, Protocol, ProviderConfig, Role, RunConfig, Session, Skill, TokenUsage,
     catalog::{self, CatalogModel, Category},
+    checkpoint::Checkpoint,
     context, info::{McpServer, ModifiedFile},
     registry::{self, RegistryItem},
 };
@@ -40,6 +41,7 @@ pub enum SettingsTab {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InspectorTab {
     Info,
+    Checkpoints,
     Details,
     Tools,
     Skills,
@@ -58,6 +60,7 @@ pub struct ModelStat {
 struct InfoSnapshot {
     files: Vec<ModifiedFile>,
     mcp: Vec<McpServer>,
+    checkpoints: Vec<Checkpoint>,
 }
 
 /// Result of a marketplace search or a one-click install, sent from a worker thread.
@@ -125,6 +128,13 @@ pub struct Rivo {
     pub info_sections: HashMap<String, bool>,
     info_rx: Option<mpsc::Receiver<InfoSnapshot>>,
     last_info_refresh: f64,
+    // Checkpoints
+    pub checkpoints: Vec<Checkpoint>,
+    pub checkpoint_label: TextEdit,
+    pub checkpoint_status: String,
+    pub checkpoint_busy: bool,
+    pub checkpoint_undo: Option<String>,
+    checkpoint_action_rx: Option<mpsc::Receiver<Result<String, String>>>,
     probe_rx: Option<mpsc::Receiver<Result<String, String>>>,
     events: mpsc::Receiver<Event>,
     engine_tx: mpsc::Sender<Event>,
@@ -214,6 +224,12 @@ impl Rivo {
             info_sections: HashMap::new(),
             info_rx: None,
             last_info_refresh: -1.0,
+            checkpoints: Vec::new(),
+            checkpoint_label: TextEdit::new(""),
+            checkpoint_status: String::new(),
+            checkpoint_busy: false,
+            checkpoint_undo: None,
+            checkpoint_action_rx: None,
             probe_rx: None,
             events,
             engine_tx,
@@ -234,7 +250,7 @@ impl Rivo {
 
     pub fn set_inspector_tab(&mut self, tab: InspectorTab) {
         self.inspector_tab = tab;
-        if tab == InspectorTab::Info {
+        if tab == InspectorTab::Info || tab == InspectorTab::Checkpoints {
             self.refresh_info();
         }
     }
@@ -261,8 +277,41 @@ impl Rivo {
             let snapshot = InfoSnapshot {
                 files: rivo_agent::info::modified_files(&cwd),
                 mcp: rivo_agent::info::mcp_servers(&cwd),
+                checkpoints: rivo_agent::checkpoint::list(&cwd).unwrap_or_default(),
             };
             let _ = tx.send(snapshot);
+        });
+    }
+
+    pub fn create_checkpoint(&mut self) {
+        if self.checkpoint_action_rx.is_some() || self.checkpoint_busy {
+            return;
+        }
+        let label = self.checkpoint_label.text.trim().to_string();
+        let cwd = self.current().cwd.clone();
+        let (tx, rx) = mpsc::channel();
+        self.checkpoint_action_rx = Some(rx);
+        self.checkpoint_busy = true;
+        self.checkpoint_status = "Saving checkpoint…".into();
+        thread::spawn(move || {
+            let result = rivo_agent::checkpoint::create(&cwd, &label)
+                .map(|c| format!("Checkpoint {} saved: {}", c.id, c.label));
+            let _ = tx.send(result);
+        });
+    }
+
+    pub fn restore_checkpoint(&mut self, id: &str) {
+        if self.checkpoint_action_rx.is_some() || self.checkpoint_busy || id.is_empty() {
+            return;
+        }
+        let id = id.to_string();
+        let cwd = self.current().cwd.clone();
+        let (tx, rx) = mpsc::channel();
+        self.checkpoint_action_rx = Some(rx);
+        self.checkpoint_busy = true;
+        self.checkpoint_status = format!("Restoring {id}…");
+        thread::spawn(move || {
+            let _ = tx.send(rivo_agent::checkpoint::restore(&cwd, &id));
         });
     }
 
@@ -875,17 +924,41 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
         if let Ok(snapshot) = rx.try_recv() {
             // A periodic refresh usually returns the same facts; only a real difference
             // should ask Rune to redraw (see the idle-poll perf warning).
-            let differs = s.modified_files != snapshot.files || s.mcp_servers != snapshot.mcp;
+            let differs = s.modified_files != snapshot.files
+                || s.mcp_servers != snapshot.mcp
+                || s.checkpoints != snapshot.checkpoints;
             s.modified_files = snapshot.files;
             s.mcp_servers = snapshot.mcp;
+            s.checkpoints = snapshot.checkpoints;
             s.info_rx = None;
             changed |= differs;
         }
     }
-    let info_visible = s.inspector.is_open() && s.inspector_tab == InspectorTab::Info;
+    let info_visible = s.inspector.is_open()
+        && (s.inspector_tab == InspectorTab::Info || s.inspector_tab == InspectorTab::Checkpoints);
     if info_visible && clock - s.last_info_refresh > 2.0 {
         s.last_info_refresh = clock;
         s.refresh_info();
+    }
+    if let Some(rx) = &s.checkpoint_action_rx {
+        if let Ok(result) = rx.try_recv() {
+            match result {
+                Ok(message) => {
+                    if message.starts_with("Checkpoint ") {
+                        s.checkpoint_label = TextEdit::new("");
+                    }
+                    // The message contains the safety tag whenever a restore happened.
+                    s.checkpoint_undo = message.split("rivo-safety-").nth(1)
+                        .map(|rest| format!("rivo-safety-{}", rest.split_whitespace().next().unwrap_or("")));
+                    s.checkpoint_status = message;
+                    s.refresh_info();
+                }
+                Err(message) => s.checkpoint_status = message,
+            }
+            s.checkpoint_busy = false;
+            s.checkpoint_action_rx = None;
+            changed = true;
+        }
     }
     if let Some(rx) = &s.catalog_rx {
         if let Ok(result) = rx.try_recv() {
@@ -941,7 +1014,7 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
-    if s.busy() || s.testing || s.registry_busy || s.catalog_busy {
+    if s.busy() || s.testing || s.registry_busy || s.catalog_busy || s.checkpoint_busy {
         tx.wake_after(ms(16));
     }
     if info_visible {
@@ -1056,6 +1129,18 @@ fn scene_demo(s: &mut Rivo) {
     let cwd = PathBuf::from(".");
     s.modified_files = rivo_agent::info::modified_files(&cwd);
     s.mcp_servers = rivo_agent::info::mcp_servers(&cwd);
+    s.checkpoints = rivo_agent::checkpoint::list(&cwd).unwrap_or_default();
+}
+
+fn scene_checkpoints(s: &mut Rivo) {
+    scene_demo(s);
+    s.inspector_tab = InspectorTab::Checkpoints;
+    s.checkpoints = vec![
+        Checkpoint { id: "a1b2c3d".into(), label: "before the UI refactor".into(), when: "2026-11-20T10:14:02Z".into() },
+        Checkpoint { id: "e4f5g6h".into(), label: "after adding marketplaces".into(), when: "2026-11-20T16:42:31Z".into() },
+        Checkpoint { id: "i7j8k9l".into(), label: "models.dev catalog working".into(), when: "2026-11-21T09:05:17Z".into() },
+    ];
+    s.checkpoint_status = "3 checkpoints · newest first".into();
 }
 
 fn scene_streaming(s: &mut Rivo) {
@@ -1152,6 +1237,7 @@ fn main() {
         families: rune_theme_opencode::FAMILIES,
         scenes: &[
             ("demo", scene_demo),
+            ("checkpoints", scene_checkpoints),
             ("streaming", scene_streaming),
             ("settings", scene_settings),
             ("providers", scene_providers),

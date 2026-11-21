@@ -605,9 +605,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_catalog_has_fifty_unique_tools() {
+    fn tool_catalog_has_fifty_three_unique_tools() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 53);
         let mut names: Vec<_> = tools.iter().map(|t| t.name()).collect();
         names.sort_unstable();
         assert!(names.windows(2).all(|w| w[0] != w[1]), "duplicate tool names");

@@ -2,6 +2,7 @@
 //! context compaction and permissions. It never imports Rune: the UI folds `Event`s into state.
 
 pub mod catalog;
+pub mod checkpoint;
 pub mod context;
 pub mod engine;
 pub mod info;

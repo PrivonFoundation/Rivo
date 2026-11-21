@@ -18,7 +18,7 @@ No API key? Rivo starts on a local mock provider that streams replies word by wo
 
 ## Main features
 
-- **50 tools** — files (read/write/edit/copy/move/delete, patch, diff), search (glob, grep, symbols), git (status/diff/log, branch, commit, stash, blame, …), commands (allowlisted + background tasks), web (fetch, search, download) and session (todos, memory, skills). Every call is shown in the transcript; toggle individual tools in the inspector.
+- **53 tools** — files (read/write/edit/copy/move/delete, patch, diff), search (glob, grep, symbols), git (status/diff/log, branch, commit, stash, blame, …), commands (allowlisted + background tasks), web (fetch, search, download), session (todos, memory, skills) and **checkpoints**. Every call is shown in the transcript; toggle individual tools in the inspector.
 - **3 wire protocols** — OpenAI-compatible, Anthropic Messages and Google Gemini.
 - **models.dev catalog** — 324 providers and 10,024 models (1,036 free), searchable by name or category (All, Free, Tool-capable, Reasoning, Open weights). One click configures protocol, endpoint, model id, context window and max output. Cached for 24h at `~/.config/rivo/models-dev.json`, with a stale-cache fallback when offline.
 - **Kilo Gateway** — kept as a preset with 14 tool-capable free models, no API key or card (200 requests/hour per IP).
@@ -26,7 +26,8 @@ No API key? Rivo starts on a local mock provider that streams replies word by wo
 - **Info-centre inspector** — live context percentage, token/cost breakdown, per-model steps, MCP servers, code-indexing and LSP status, and changed files with `+/-` line counts.
 - **Context management** — live token usage and automatic compaction of old turns into a summary marker.
 - **Skills** — `SKILL.md` playbooks discovered from built-ins, `~/.config/rivo/skills/` and `<workspace>/.rivo/skills/`.
-- **Sessions & tabs** — project-grouped sessions and multiple tabs.
+- **Checkpoints** — save a named snapshot of the workspace, list all checkpoints and restore any version from the inspector. Restoring first creates a `rivo-safety-*` tag, so it can be undone with one click. The agent can do the same through `checkpoint_create`, `checkpoint_list` and `checkpoint_restore`.
+- **Sessions & tabs** — project-grouped sessions, multiple tabs and a right-hand inspector with **Info** and **Checkpoints** tabs (context, token usage, models, MCP, git changes, saved versions).
 - **Safety** — Auto / Read-only modes; workspace-confined paths and allowlisted commands; Stop cancels a running turn.
 
 ## Settings
@@ -87,6 +88,7 @@ Rune renders headlessly with the same renderer as the window:
 
 ```bash
 cargo run -p rivo-app --bin rivo -- --scene demo --snap /tmp/demo.png --size 1160x760
+cargo run -p rivo-app --bin rivo -- --scene checkpoints --snap /tmp/checkpoints.png
 cargo run -p rivo-app --bin rivo -- --scene settings --snap /tmp/settings.png
 cargo run -p rivo-app --bin rivo -- --scene providers --snap /tmp/providers.png
 cargo run -p rivo-app --bin rivo -- --scene marketplace --snap /tmp/mcp.png

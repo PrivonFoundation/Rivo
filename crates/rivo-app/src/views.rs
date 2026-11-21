@@ -749,11 +749,54 @@ pub fn inspector(s: &Rivo, k: &Kit) -> El {
         .scroll(rune::ScrollSpec { stick_bottom: false });
     body = body.child(row().gap(3.0).w_full()
         .child(tab_pill(s, k, "Info", InspectorTab::Info))
+        .child(tab_pill(s, k, "Checkpoints", InspectorTab::Checkpoints))
         .child(tab_pill(s, k, "Details", InspectorTab::Details))
         .child(tab_pill(s, k, "Tools", InspectorTab::Tools))
         .child(tab_pill(s, k, "Skills", InspectorTab::Skills)));
 
     match s.inspector_tab {
+        InspectorTab::Checkpoints => {
+            let label = TextInput::new(&s.checkpoint_label)
+                .placeholder("Checkpoint name…")
+                .label("Checkpoint name")
+                .width(Some(180.0))
+                .on_edit(|s: &mut Rivo| &mut s.checkpoint_label)
+                .on_submit(|s: &mut Rivo, _| s.create_checkpoint())
+                .build(k);
+            let create = Button::new(if s.checkpoint_busy { "Working…" } else { "Save" })
+                .variant(ButtonVariant::Contrast).control_size(ControlSize::Small)
+                .help("Save a checkpoint").on_press(|s: &mut Rivo| s.create_checkpoint()).build(k);
+            body = body.child(text("Checkpoints").font(k.ty.ui_medium).color(c.text_base))
+                .child(text("Snapshots of the workspace. Restore returns to any version; a safety tag is created first so you can undo.")
+                    .font(k.ty.small).color(c.text_muted).wrap())
+                .child(row().w_full().gap(8.0).center_y().child(label).child(create));
+            if let Some(tag) = &s.checkpoint_undo {
+                let tag = tag.clone();
+                body = body.child(Button::new("Undo last restore")
+                    .variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                    .on_press(move |s: &mut Rivo| s.restore_checkpoint(&tag)).build(k));
+            }
+            if !s.checkpoint_status.is_empty() {
+                body = body.child(text(s.checkpoint_status.clone()).font(k.ty.small)
+                    .color(c.text_muted).wrap());
+            }
+            for cp in &s.checkpoints {
+                let id = cp.id.clone();
+                let when = cp.when.replace('T', " ").chars().take(16).collect::<String>();
+                body = body.child(row().w_full().min_h(38.0).padding(7.0).radius(k.radius.sm)
+                    .gap(8.0).center_y().hover(c.hover)
+                    .child(col().grow(1.0).min_w(0.0).gap(2.0)
+                        .child(text(cp.label.clone()).font(k.ty.ui_compact).color(c.text_base).truncate())
+                        .child(text(format!("{} · {}", id, when)).font(k.ty.small).color(c.text_faint)))
+                    .child(Button::new("Restore").variant(ButtonVariant::Ghost)
+                        .control_size(ControlSize::Small)
+                        .on_press(move |s: &mut Rivo| s.restore_checkpoint(&id)).build(k)));
+            }
+            if s.checkpoints.is_empty() {
+                body = body.child(text("No checkpoints yet. Save one before a risky change.")
+                    .font(k.ty.small).color(c.text_muted).wrap());
+            }
+        }
         InspectorTab::Details => {
             body = body.child(text("Session").font(k.ty.ui_medium).color(c.text_base))
                 .child(field("Title", session.title.clone()))

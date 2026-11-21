@@ -44,6 +44,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(RunCommandBg), Box::new(TaskOutput), Box::new(TaskStop), Box::new(TaskList),
         Box::new(WebSearch), Box::new(HttpRequest), Box::new(DownloadFile),
         Box::new(TodoRead), Box::new(TodoClear), Box::new(ListSkills), Box::new(SystemInfo),
+        Box::new(CheckpointCreate), Box::new(CheckpointList), Box::new(CheckpointRestore),
     ]
 }
 
@@ -996,6 +997,48 @@ impl Tool for SystemInfo {
         Ok(format!("OS: {}\nArch: {}\nWorkspace: {}\nTools: {}\nSkills: {}\nPermission: {:?}",
             std::env::consts::OS, std::env::consts::ARCH, ctx.workspace.display(),
             crate::tools::all_tools().len(), ctx.skills.len(), ctx.permission))
+    }
+}
+
+struct CheckpointCreate;
+impl Tool for CheckpointCreate {
+    fn name(&self) -> &'static str { "checkpoint_create" }
+    fn description(&self) -> &'static str { "Save a named checkpoint of all workspace changes so you can return to this version later." }
+    fn schema(&self) -> Value {
+        json!({"type":"object","properties":{"label":{"type":"string"}},"additionalProperties":false})
+    }
+    fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<String, String> {
+        ctx.writable()?;
+        let label = args.get("label").and_then(Value::as_str).unwrap_or("manual checkpoint");
+        let c = crate::checkpoint::create(&ctx.workspace, label)?;
+        Ok(format!("Checkpoint {} saved: {} ({})", c.id, c.label, c.when))
+    }
+}
+
+struct CheckpointList;
+impl Tool for CheckpointList {
+    fn name(&self) -> &'static str { "checkpoint_list" }
+    fn description(&self) -> &'static str { "List saved checkpoints with their ids, labels and timestamps." }
+    fn schema(&self) -> Value { json!({"type":"object","properties":{},"additionalProperties":false}) }
+    fn execute(&self, ctx: &ToolContext, _: &Value) -> Result<String, String> {
+        let items = crate::checkpoint::list(&ctx.workspace)?;
+        if items.is_empty() {
+            return Ok("No checkpoints yet.".into());
+        }
+        Ok(items.iter().map(|c| format!("{}  {}  {}", c.id, c.when, c.label)).collect::<Vec<_>>().join("\n"))
+    }
+}
+
+struct CheckpointRestore;
+impl Tool for CheckpointRestore {
+    fn name(&self) -> &'static str { "checkpoint_restore" }
+    fn description(&self) -> &'static str { "Return the workspace to a checkpoint id from checkpoint_list. Creates a safety tag so the restore can be undone." }
+    fn schema(&self) -> Value {
+        json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false})
+    }
+    fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<String, String> {
+        ctx.writable()?;
+        crate::checkpoint::restore(&ctx.workspace, &arg_str(args, "id")?)
     }
 }
 
