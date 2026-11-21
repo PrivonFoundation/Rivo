@@ -917,6 +917,8 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
                     if let Some(id) = s.registry_items.iter().find(|i| message.contains(&i.name)).map(|i| i.id.clone()) {
                         if !s.installed_ids.contains(&id) { s.installed_ids.push(id); }
                     }
+                    // An added MCP server should show up in the right-hand panel at once.
+                    s.refresh_info();
                     s.registry_status = message;
                 }
                 RegistryResult::Failed(message) => {

@@ -156,15 +156,7 @@ fn collect(obj: Option<&serde_json::Map<String, Value>>, out: &mut Vec<McpServer
     }
 }
 
-/// Read MCP server definitions from Rivo's config, the workspace and — as a convenience —
-/// the OpenCode config, which uses the same shape under `mcp.servers`.
-pub fn mcp_servers(workspace: &Path) -> Vec<McpServer> {
-    let paths = [
-        home_dir().join(".config/rivo/mcp.json"),
-        workspace.join(".mcp.json"),
-        workspace.join(".rivo/mcp.json"),
-        home_dir().join(".config/opencode/opencode.json"),
-    ];
+fn mcp_servers_in(paths: &[PathBuf]) -> Vec<McpServer> {
     let mut out = Vec::new();
     for path in paths {
         let Ok(text) = std::fs::read_to_string(path) else { continue };
@@ -174,6 +166,13 @@ pub fn mcp_servers(workspace: &Path) -> Vec<McpServer> {
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Only servers the user added through Settings belong in the inspector. The MCP Marketplace
+/// writes to `~/.config/rivo/mcp.json`; configs of other tools (e.g. OpenCode) are not Rivo's
+/// servers and must not be listed here.
+pub fn mcp_servers(_workspace: &Path) -> Vec<McpServer> {
+    mcp_servers_in(&[home_dir().join(".config/rivo/mcp.json")])
 }
 
 /// USD estimate per million tokens for a handful of paid models. Everything in Rivo's
@@ -228,5 +227,21 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(out.iter().any(|s| s.name == "blender" && s.status == "Configured"));
         assert!(out.iter().any(|s| s.name == "broken" && s.status == "Unavailable"));
+    }
+
+    #[test]
+    fn only_rivo_config_is_read_for_mcp_servers() {
+        let dir = std::env::temp_dir().join(format!("rivo-mcp-info-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let rivo = dir.join("rivo-mcp.json");
+        let other = dir.join("other-tool.json");
+        std::fs::write(&rivo, r#"{"mcpServers":{"mine":{"command":"npx","args":["-y","pkg"]}}}"#).unwrap();
+        std::fs::write(&other, r#"{"mcp":{"servers":{"foreign":{"command":"/bin/true"}}}}"#).unwrap();
+
+        let found = mcp_servers_in(&[rivo]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "mine");
+        assert!(!found.iter().any(|s| s.name == "foreign"));
+        std::fs::remove_dir_all(dir).ok();
     }
 }
