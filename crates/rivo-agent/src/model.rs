@@ -235,6 +235,8 @@ pub use Protocol as ChatProtocol;
 pub enum Preset {
     Mock,
     KiloFree,
+    /// A discovered local server (Ollama, LM Studio, llama.cpp, …) — no API key needed.
+    Local,
     Custom,
 }
 
@@ -243,6 +245,7 @@ impl Preset {
         match self {
             Preset::Mock => "Mock provider",
             Preset::KiloFree => "Kilo Code — free models",
+            Preset::Local => "Local model",
             Preset::Custom => "Custom / OpenAI-compatible",
         }
     }
@@ -265,6 +268,9 @@ impl ProviderConfig {
         }
         if base_url.contains("api.kilo.ai") || provider.as_deref() == Some("kilo") {
             return Self::kilo_free(if model == "gpt-4o-mini" { "kilo-auto/free" } else { &model });
+        }
+        if provider.as_deref() == Some("local") {
+            return Self::local(base_url, model);
         }
         Self {
             kind: ProviderKind::OpenAiCompatible,
@@ -295,6 +301,17 @@ impl ProviderConfig {
         }
     }
 
+    /// A local server discovered by `local::scan`. Local runtimes rarely require a key.
+    pub fn local(base_url: String, model: String) -> Self {
+        Self {
+            kind: ProviderKind::OpenAiCompatible,
+            preset: Preset::Local,
+            base_url,
+            api_key: String::new(),
+            model,
+        }
+    }
+
     pub fn custom(base_url: String, api_key: String, model: String) -> Self {
         Self { kind: ProviderKind::OpenAiCompatible, preset: Preset::Custom, base_url, api_key, model }
     }
@@ -303,16 +320,20 @@ impl ProviderConfig {
         match self.preset {
             Preset::Mock => "mock (local)",
             Preset::KiloFree => "kilo code (free)",
+            Preset::Local => "local model",
             Preset::Custom => "openai-compatible",
         }
     }
 
-    /// Validation used by the settings pane. The Kilo free gateway needs no API key.
+    /// Validation used by the settings pane. The Kilo gateway and local servers need no API key.
     pub fn problem(&self) -> Option<&'static str> {
         match self.preset {
             Preset::Mock => None,
             Preset::KiloFree if self.model.is_empty() => Some("Pick a free model."),
             Preset::KiloFree => None,
+            Preset::Local if self.base_url.is_empty() => Some("Base URL is empty."),
+            Preset::Local if self.model.is_empty() => Some("Model is empty."),
+            Preset::Local => None,
             Preset::Custom if self.base_url.is_empty() => Some("Base URL is empty."),
             Preset::Custom if self.api_key.is_empty() => Some("API key is empty."),
             Preset::Custom if self.model.is_empty() => Some("Model is empty."),

@@ -4,6 +4,7 @@
 //! `rivo-agent` and knows nothing about the UI; this crate is only the native window.
 
 mod demo;
+mod remote;
 mod views;
 
 use std::collections::HashMap;
@@ -19,6 +20,7 @@ use rivo_agent::{
     catalog::{self, CatalogModel, Category},
     checkpoint::Checkpoint,
     context, info::{McpServer, ModifiedFile},
+    local::{self, LocalModel, ScanReport},
     registry::{self, RegistryItem},
 };
 use rune::{AppSpec, Chrome, Color, Cx, El, KeyEvent, Spring, TextEdit, Tx, col, row};
@@ -31,6 +33,8 @@ pub const PROJECTS: [(&str, f32); 4] = [("rivo", 22.0), ("rune", 250.0), ("site"
 pub enum SettingsTab {
     Provider,
     Connection,
+    Local,
+    Remote,
     McpMarketplace,
     SkillsMarketplace,
     Skills,
@@ -108,6 +112,14 @@ pub struct Rivo {
     pub catalog_status: String,
     pub catalog_busy: bool,
     catalog_rx: Option<mpsc::Receiver<Result<Vec<CatalogModel>, String>>>,
+    // Local model discovery (localhost + same-Wi-Fi servers)
+    pub local_models: Vec<LocalModel>,
+    pub local_status: String,
+    pub local_busy: bool,
+    pub local_scan_lan: bool,
+    pub local_host: TextEdit,
+    pub local_scanned: bool,
+    local_rx: Option<mpsc::Receiver<ScanReport>>,
     // Agent configuration
     pub model_config: ModelConfig,
     pub agent_settings: AgentSettings,
@@ -135,6 +147,15 @@ pub struct Rivo {
     pub checkpoint_busy: bool,
     pub checkpoint_undo: Option<String>,
     checkpoint_action_rx: Option<mpsc::Receiver<Result<String, String>>>,
+    // Remote device bridge (phone app over LAN)
+    pub remote_enabled: bool,
+    pub remote_port: TextEdit,
+    pub remote_token: String,
+    pub remote_devices: Vec<remote::RemoteDevice>,
+    pub remote_status: String,
+    remote_tx: Option<mpsc::Sender<remote::RemoteCommand>>,
+    remote_rx: Option<mpsc::Receiver<remote::RemoteCommand>>,
+    remote_server: Option<remote::RemoteServer>,
     probe_rx: Option<mpsc::Receiver<Result<String, String>>>,
     events: mpsc::Receiver<Event>,
     engine_tx: mpsc::Sender<Event>,
@@ -171,6 +192,19 @@ impl Rivo {
         let mut installed_ids: Vec<String> = rivo_agent::info::mcp_servers(&cwd)
             .into_iter().map(|s| s.name).collect();
         installed_ids.extend(skills.iter().map(|s| s.name.clone()));
+        let (remote_enabled, remote_port, remote_token) = load_remote_config();
+        let (remote_tx, remote_rx) = mpsc::channel();
+        let mut remote_server = None;
+        let mut remote_status = String::new();
+        if remote_enabled {
+            match remote::RemoteServer::start(remote_port, remote_token.clone(), remote_tx.clone()) {
+                Ok(server) => {
+                    remote_server = Some(server);
+                    remote_status = format!("Bridge listening on {}", remote::lan_address(remote_port));
+                }
+                Err(e) => remote_status = format!("Bridge failed: {e}"),
+            }
+        }
         Rivo {
             sessions: vec![session],
             selected: "s1".into(),
@@ -206,6 +240,13 @@ impl Rivo {
             catalog_status: String::new(),
             catalog_busy: false,
             catalog_rx: None,
+            local_models: Vec::new(),
+            local_status: String::new(),
+            local_busy: false,
+            local_scan_lan: false,
+            local_host: TextEdit::new(""),
+            local_scanned: false,
+            local_rx: None,
             model_config,
             agent_settings,
             skills,
@@ -230,6 +271,14 @@ impl Rivo {
             checkpoint_busy: false,
             checkpoint_undo: None,
             checkpoint_action_rx: None,
+            remote_enabled: remote_server.is_some(),
+            remote_port: TextEdit::new(remote_port.to_string()),
+            remote_token,
+            remote_devices: Vec::new(),
+            remote_status,
+            remote_tx: Some(remote_tx),
+            remote_rx: Some(remote_rx),
+            remote_server,
             probe_rx: None,
             events,
             engine_tx,
@@ -369,9 +418,9 @@ impl Rivo {
         }
     }
 
-    /// The inspector's three text fields only drive the custom endpoint.
+    /// The inspector's three text fields drive both custom and discovered local endpoints.
     fn sync_custom_fields(&mut self) {
-        if self.config.preset == Preset::Custom {
+        if matches!(self.config.preset, Preset::Custom | Preset::Local) {
             self.config.base_url = self.base_url.text.trim().to_owned();
             self.config.api_key = self.api_key.text.trim().to_owned();
             self.config.model = self.model_name.text.trim().to_owned();
@@ -393,6 +442,9 @@ impl Rivo {
         self.system_prompt = TextEdit::new(self.agent_settings.system_prompt.clone());
         self.connection_status.clear();
         self.settings_open = true;
+        if self.settings_tab == SettingsTab::Local && !self.local_scanned {
+            self.scan_local();
+        }
     }
 
     pub fn choose_tab(&mut self, tab: SettingsTab) {
@@ -410,6 +462,9 @@ impl Rivo {
         if tab == SettingsTab::Connection && self.catalog_models.is_empty() && !self.catalog_busy {
             self.load_catalog();
         }
+        if tab == SettingsTab::Local && !self.local_scanned {
+            self.scan_local();
+        }
     }
 
     /// Fetch models.dev (~7 MB, 324 providers) on a worker thread; cached for 24 hours.
@@ -426,8 +481,52 @@ impl Rivo {
         });
     }
 
+    /// Probe standard local-model ports on a worker thread. With `local_scan_lan` enabled the
+    /// scan also walks this machine's /24, so servers on the same Wi-Fi are found.
+    pub fn scan_local(&mut self) {
+        if self.local_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.local_rx = Some(rx);
+        self.local_busy = true;
+        self.local_scanned = true;
+        self.local_status = "Scanning local model ports…".into();
+        let include_lan = self.local_scan_lan;
+        let host = self.local_host.text.trim().to_string();
+        thread::spawn(move || {
+            let _ = tx.send(local::scan(include_lan, &host));
+        });
+    }
+
+    pub fn toggle_local_lan(&mut self) {
+        self.local_scan_lan = !self.local_scan_lan;
+        // Rescan right away so switching the toggle is the only click needed.
+        self.scan_local();
+    }
+
     pub fn set_catalog_category(&mut self, category: Category) {
         self.catalog_category = category;
+    }
+
+    /// Shared one-click configuration for catalog and locally discovered models.
+    fn apply_provider(&mut self, config: ProviderConfig, protocol: Protocol, context_window: usize, max_output: usize, status: String) {
+        self.config = config;
+        self.settings_preset = self.config.preset;
+        self.model_config.protocol = protocol;
+        self.model_config.base_hint = self.config.base_url.clone();
+        self.model_config.context_window = context_window.max(4_096);
+        self.model_config.max_output = max_output.clamp(256, 131_072);
+        let used = context::conversation_tokens(&self.current().messages);
+        self.base_url = TextEdit::new(self.config.base_url.clone());
+        self.api_key = TextEdit::new(self.config.api_key.clone());
+        self.model_name = TextEdit::new(self.config.model.clone());
+        self.context_window_edit = TextEdit::new(self.model_config.context_window.to_string());
+        self.max_output_edit = TextEdit::new(self.model_config.max_output.to_string());
+        self.context_window = self.model_config.context_window;
+        self.context_used = used;
+        self.connection_status = status;
+        save_config(&self.config, &self.model_config, &self.agent_settings);
     }
 
     /// Apply a models.dev entry: protocol, endpoint, model id, context and output limits.
@@ -439,22 +538,28 @@ impl Rivo {
         let key = if model.env.is_empty() { String::new() } else {
             std::env::var(&model.env).unwrap_or_default()
         };
-        self.config = ProviderConfig::custom(model.base_url.clone(), key, model.id.clone());
-        self.settings_preset = Preset::Custom;
-        self.model_config.protocol = model.protocol;
-        self.model_config.base_hint = model.base_url.clone();
-        self.model_config.context_window = model.context.max(4_096);
-        self.model_config.max_output = model.max_output.clamp(256, 131_072);
-        let used = context::conversation_tokens(&self.current().messages);
-        self.base_url = TextEdit::new(self.config.base_url.clone());
-        self.api_key = TextEdit::new(self.config.api_key.clone());
-        self.model_name = TextEdit::new(self.config.model.clone());
-        self.context_window_edit = TextEdit::new(self.model_config.context_window.to_string());
-        self.max_output_edit = TextEdit::new(self.model_config.max_output.to_string());
-        self.context_window = self.model_config.context_window;
-        self.context_used = used;
-        self.connection_status = format!("Using {} · {}", model.provider_name, model.name);
-        save_config(&self.config, &self.model_config, &self.agent_settings);
+        let status = format!("Using {} · {}", model.provider_name, model.name);
+        self.apply_provider(
+            ProviderConfig::custom(model.base_url.clone(), key, model.id.clone()),
+            model.protocol,
+            model.context,
+            model.max_output,
+            status,
+        );
+    }
+
+    /// One-click use of a discovered local model: endpoint, model id and a safe context window.
+    pub fn use_local_model(&mut self, index: usize) {
+        let Some(model) = self.local_models.get(index).cloned() else { return };
+        let status = format!("Using {} · {} at {}", model.backend, model.name, model.address());
+        let max_output = self.model_config.max_output;
+        self.apply_provider(
+            ProviderConfig::local(model.base_url.clone(), model.id.clone()),
+            Protocol::OpenAiCompatible,
+            model.context,
+            max_output,
+            status,
+        );
     }
 
     /// Fetch the active marketplace in the background; never block the UI thread.
@@ -606,6 +711,21 @@ impl Rivo {
     /// Switch the active model from the composer picker. Picking a Kilo free model also
     /// switches the provider to the free gateway, so the composer is enough for a quick change.
     pub fn choose_model(&mut self, id: &str) {
+        // Discovered local models use `base_url|model` as their picker id, so two servers can
+        // serve the same model name without colliding.
+        if let Some(model) = self.local_models.iter().find(|m| m.key() == id).cloned() {
+            let status = format!("Using {} · {} at {}", model.backend, model.name, model.address());
+            let max_output = self.model_config.max_output;
+            self.apply_provider(
+                ProviderConfig::local(model.base_url.clone(), model.id.clone()),
+                Protocol::OpenAiCompatible,
+                model.context,
+                max_output,
+                status,
+            );
+            self.close_model_picker();
+            return;
+        }
         if let Some(index) = KILO_FREE_MODELS.iter().position(|m| m.id == id) {
             let model = KILO_FREE_MODELS[index];
             let used = context::conversation_tokens(&self.current().messages);
@@ -631,6 +751,10 @@ impl Rivo {
         match self.settings_preset {
             Preset::Mock => ProviderConfig::mock(),
             Preset::KiloFree => ProviderConfig::kilo_free(KILO_FREE_MODELS[self.free_index].id),
+            Preset::Local => ProviderConfig::local(
+                self.base_url.text.trim().to_owned(),
+                self.model_name.text.trim().to_owned(),
+            ),
             Preset::Custom => ProviderConfig::custom(
                 self.base_url.text.trim().to_owned(),
                 self.api_key.text.trim().to_owned(),
@@ -668,21 +792,185 @@ impl Rivo {
         });
     }
 
-    pub fn submit(&mut self) {
-        let prompt = self.draft.text.trim().to_owned();
-        if prompt.is_empty() || self.current().busy {
+    // ---------------------------------------------------------------- remote bridge
+
+    pub fn toggle_remote(&mut self) {
+        if let Some(mut server) = self.remote_server.take() {
+            server.stop();
+            self.remote_enabled = false;
+            self.remote_status = "Bridge stopped.".into();
+            self.persist_remote();
             return;
         }
-        self.sync_custom_fields();
-        self.draft = TextEdit::new("");
+        let port: u16 = self.remote_port.text.trim().parse().unwrap_or(8787).min(65535);
+        let tx = match self.remote_tx.clone() {
+            Some(tx) => tx,
+            None => {
+                let (tx, rx) = mpsc::channel();
+                self.remote_tx = Some(tx.clone());
+                self.remote_rx = Some(rx);
+                tx
+            }
+        };
+        match remote::RemoteServer::start(port, self.remote_token.clone(), tx) {
+            Ok(server) => {
+                self.remote_server = Some(server);
+                self.remote_enabled = true;
+                self.remote_status = format!("Bridge listening on {}", remote::lan_address(port));
+            }
+            Err(e) => self.remote_status = format!("Bridge failed: {e}"),
+        }
+        self.persist_remote();
+    }
 
-        let idx = self.index();
-        let id = self.sessions[idx].id.clone();
+    pub fn regenerate_remote_code(&mut self) {
+        self.remote_token = remote::new_code();
+        self.remote_devices.clear();
+        self.remote_status = "New pairing code generated; previous devices are unpaired.".into();
+        if self.remote_enabled {
+            self.toggle_remote();
+            self.toggle_remote();
+        }
+        self.persist_remote();
+    }
+
+    fn persist_remote(&self) {
+        let path = config_path();
+        let mut v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).unwrap_or_default()
+        ).unwrap_or_else(|_| serde_json::json!({}));
+        v["remote_enabled"] = serde_json::json!(self.remote_enabled);
+        v["remote_port"] = serde_json::json!(self.remote_port.text.trim().parse::<u16>().unwrap_or(8787));
+        v["remote_token"] = serde_json::json!(self.remote_token);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap_or_default()) {
+            eprintln!("rivo: could not save remote settings: {e}");
+        }
+    }
+
+    fn handle_remote(&mut self, cmd: remote::RemoteCommand) {
+        use remote::RemoteCommand as C;
+        match cmd {
+            C::Status { reply } => {
+                let value = serde_json::json!({
+                    "name": "Rivo",
+                    "sessions": self.sessions.len(),
+                    "devices": self.remote_devices.len(),
+                    "tools": rivo_agent::tools::all_tools().len(),
+                    "model": self.config.model,
+                });
+                let _ = reply.send(Ok(value));
+            }
+            C::Pair { name, ip, reply } => {
+                let since = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let device = remote::RemoteDevice { name: name.clone(), ip: ip.clone(), since: since.to_string() };
+                if !self.remote_devices.iter().any(|d| d.ip == ip && d.name == name) {
+                    self.remote_devices.push(device);
+                }
+                self.remote_status = format!("{name} ({ip}) paired.");
+                let _ = reply.send(Ok(serde_json::json!({ "token": self.remote_token, "name": name })));
+            }
+            C::ListSessions { reply } => {
+                let value = serde_json::json!(self.sessions.iter().map(|s| serde_json::json!({
+                    "id": s.id, "title": s.title, "project": s.project, "busy": s.busy,
+                })).collect::<Vec<_>>());
+                let _ = reply.send(Ok(value));
+            }
+            C::GetSession { id, reply } => {
+                let value = self.sessions.iter().find(|s| s.id == id).map(session_json);
+                let _ = reply.send(value.ok_or_else(|| "session not found".into()));
+            }
+            C::NewSession { title, reply } => {
+                let id = format!("s{}", self.next_id);
+                self.next_id += 1;
+                let cwd = self.current().cwd.clone();
+                let project = cwd.file_name().and_then(|s| s.to_str()).unwrap_or("workspace").to_string();
+                let session = Session::new(id.clone(), title, project, cwd);
+                let value = session_json(&session);
+                self.sessions.push(session);
+                let _ = reply.send(Ok(value));
+            }
+            C::Send { id, text, reply } => {
+                let ok = self.start_turn(&id, &text);
+                let _ = reply.send(if ok { Ok(serde_json::json!({ "started": true, "id": id })) }
+                    else { Err("session is busy or missing".into()) });
+            }
+            C::Checkpoints { reply } => {
+                let cwd = self.current().cwd.clone();
+                let (rtx, rx) = mpsc::channel();
+                thread::spawn(move || {
+                    let result = rivo_agent::checkpoint::list(&cwd).map(|items| serde_json::json!(
+                        items.iter().map(|c| serde_json::json!({ "id": c.id, "label": c.label, "when": c.when })).collect::<Vec<_>>()
+                    ));
+                    let _ = rtx.send(result);
+                });
+                self.reply_later(reply, rx);
+            }
+            C::SaveCheckpoint { label, reply } => {
+                let cwd = self.current().cwd.clone();
+                let (rtx, rx) = mpsc::channel();
+                thread::spawn(move || {
+                    let result = rivo_agent::checkpoint::create(&cwd, &label).map(|c| serde_json::json!({
+                        "id": c.id, "label": c.label, "when": c.when,
+                    }));
+                    let _ = rtx.send(result);
+                });
+                self.reply_later(reply, rx);
+                self.refresh_info();
+            }
+            C::RestoreCheckpoint { id, reply } => {
+                let cwd = self.current().cwd.clone();
+                let (rtx, rx) = mpsc::channel();
+                thread::spawn(move || {
+                    let result = rivo_agent::checkpoint::restore(&cwd, &id)
+                        .map(|message| serde_json::json!({ "message": message }));
+                    let _ = rtx.send(result);
+                });
+                self.reply_later(reply, rx);
+                self.refresh_info();
+            }
+        }
+    }
+
+    fn reply_later(&self, reply: mpsc::Sender<Result<serde_json::Value, String>>,
+                   rx: mpsc::Receiver<Result<serde_json::Value, String>>) {
+        thread::spawn(move || {
+            let result = rx.recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|e| Err(format!("checkpoint failed: {e}")));
+            let _ = reply.send(result);
+        });
+    }
+
+    pub fn submit(&mut self) {
+        let prompt = self.draft.text.trim().to_owned();
+        if prompt.is_empty() {
+            return;
+        }
+        let id = self.selected.clone();
+        if self.start_turn(&id, &prompt) {
+            self.sync_custom_fields();
+            self.draft = TextEdit::new("");
+        }
+    }
+
+    /// Start a turn on any session — used by the composer and by the phone bridge.
+    pub fn start_turn(&mut self, id: &str, prompt: &str) -> bool {
+        let prompt = prompt.trim().to_owned();
+        if prompt.is_empty() {
+            return false;
+        }
+        let Some(idx) = self.sessions.iter().position(|s| s.id == id) else { return false };
+        if self.sessions[idx].busy {
+            return false;
+        }
         self.turn += 1;
         let turn = self.turn;
-        self.turns.insert(id.clone(), turn);
+        self.turns.insert(id.to_string(), turn);
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancels.insert(id.clone(), cancel.clone());
+        self.cancels.insert(id.to_string(), cancel.clone());
 
         {
             let session = &mut self.sessions[idx];
@@ -707,7 +995,8 @@ impl Rivo {
             &session.cwd,
         );
         self.context_used = context::conversation_tokens(&input.messages);
-        let _ = rivo_agent::engine::spawn(id, turn, cancel, input, run, self.engine_tx.clone());
+        let _ = rivo_agent::engine::spawn(id.to_string(), turn, cancel, input, run, self.engine_tx.clone());
+        true
     }
 
     pub fn stop(&mut self) {
@@ -800,6 +1089,20 @@ fn config_path() -> PathBuf {
 
 type SavedConfig = (ProviderConfig, ModelConfig, AgentSettings);
 
+/// Remote bridge settings live in the same config file, but are loaded separately so the
+/// existing tuple type stays unchanged.
+fn load_remote_config() -> (bool, u16, String) {
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config_path()).unwrap_or_default()
+    ).unwrap_or_default();
+    let port = v.get("remote_port").and_then(serde_json::Value::as_u64)
+        .unwrap_or(8787).min(65535) as u16;
+    let token = v.get("remote_token").and_then(serde_json::Value::as_str)
+        .filter(|s| s.len() >= 8).map(str::to_string).unwrap_or_else(remote::new_code);
+    let enabled = v.get("remote_enabled").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    (enabled, port, token)
+}
+
 fn load_config() -> Option<SavedConfig> {
     let text = std::fs::read_to_string(config_path()).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -807,12 +1110,14 @@ fn load_config() -> Option<SavedConfig> {
     let preset = match v.get("preset").and_then(serde_json::Value::as_str).unwrap_or("") {
         "mock" => Preset::Mock,
         "kilo" => Preset::KiloFree,
+        "local" => Preset::Local,
         "custom" => Preset::Custom,
         _ => return None,
     };
     let provider = match preset {
         Preset::Mock => ProviderConfig::mock(),
         Preset::KiloFree => ProviderConfig::kilo_free(&get("model")),
+        Preset::Local => ProviderConfig::local(get("base_url"), get("model")),
         Preset::Custom => ProviderConfig::custom(get("base_url"), get("api_key"), get("model")),
     };
     let protocol = match v.get("protocol").and_then(serde_json::Value::as_str).unwrap_or("") {
@@ -847,6 +1152,7 @@ fn save_config(config: &ProviderConfig, model: &ModelConfig, settings: &AgentSet
     let preset = match config.preset {
         Preset::Mock => "mock",
         Preset::KiloFree => "kilo",
+        Preset::Local => "local",
         Preset::Custom => "custom",
     };
     let protocol = match model.protocol {
@@ -858,7 +1164,7 @@ fn save_config(config: &ProviderConfig, model: &ModelConfig, settings: &AgentSet
         PermissionMode::Auto => "auto",
         PermissionMode::ReadOnly => "readonly",
     };
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "preset": preset,
         "base_url": config.base_url,
         "api_key": config.api_key,
@@ -875,6 +1181,14 @@ fn save_config(config: &ProviderConfig, model: &ModelConfig, settings: &AgentSet
         "enabled_tools": settings.enabled_tools,
         "enabled_skills": settings.enabled_skills,
     });
+    // Keep the remote bridge settings when saving model/context changes.
+    if let Ok(old) = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(config_path()).unwrap_or_default()) {
+        for key in ["remote_enabled", "remote_port", "remote_token"] {
+            if let Some(value) = old.get(key) {
+                json[key] = value.clone();
+            }
+        }
+    }
     let path = config_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -902,6 +1216,23 @@ fn toggle_name(list: &mut Vec<String>, name: &str, all: &[String]) {
     }
 }
 
+/// JSON form of a session for the phone bridge.
+fn session_json(s: &Session) -> serde_json::Value {
+    serde_json::json!({
+        "id": s.id,
+        "title": s.title,
+        "project": s.project,
+        "busy": s.busy,
+        "messages": s.messages.iter().map(|m| serde_json::json!({
+            "role": format!("{:?}", m.role).to_lowercase(),
+            "text": m.text,
+            "tools": m.tools.iter().map(|t| serde_json::json!({
+                "name": t.name, "ok": t.ok, "finished": t.finished, "result": t.result,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn title_from(prompt: &str) -> String {
     let first = prompt.lines().next().unwrap_or(prompt).trim();
     let mut title: String = first.chars().take(46).collect();
@@ -919,6 +1250,13 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     while let Ok(ev) = s.events.try_recv() {
         changed |= s.apply_event(ev);
+    }
+    if let Some(rx) = s.remote_rx.take() {
+        while let Ok(cmd) = rx.try_recv() {
+            s.handle_remote(cmd);
+            changed = true;
+        }
+        s.remote_rx = Some(rx);
     }
     if let Some(rx) = &s.info_rx {
         if let Ok(snapshot) = rx.try_recv() {
@@ -978,6 +1316,15 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
+    if let Some(rx) = &s.local_rx {
+        if let Ok(report) = rx.try_recv() {
+            s.local_status = report.summary();
+            s.local_models = report.models;
+            s.local_busy = false;
+            s.local_rx = None;
+            changed = true;
+        }
+    }
     if let Some(rx) = &s.registry_rx {
         if let Ok(result) = rx.try_recv() {
             match result {
@@ -1014,8 +1361,12 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
-    if s.busy() || s.testing || s.registry_busy || s.catalog_busy || s.checkpoint_busy {
+    if s.busy() || s.testing || s.registry_busy || s.catalog_busy || s.local_busy || s.checkpoint_busy {
         tx.wake_after(ms(16));
+    }
+    if s.remote_enabled {
+        // The bridge runs on another thread; poll must run so its requests get answered.
+        tx.wake_after(ms(60));
     }
     if info_visible {
         // Keep counts and the working-tree view warm while the info centre is open.
@@ -1156,6 +1507,27 @@ fn scene_settings(s: &mut Rivo) {
     s.connection_status = "Ready to connect — no API key needed.".into();
 }
 
+fn scene_remote(s: &mut Rivo) {
+    scene_settings(s);
+    s.settings_tab = SettingsTab::Remote;
+    let port: u16 = 8799;
+    let token = "test-pairing-code-1234".to_string();
+    let (tx, rx) = mpsc::channel();
+    s.remote_tx = Some(tx.clone());
+    s.remote_rx = Some(rx);
+    s.remote_enabled = true;
+    s.remote_port = TextEdit::new(port.to_string());
+    s.remote_token = token.clone();
+    match remote::RemoteServer::start(port, token, tx) {
+        Ok(server) => s.remote_server = Some(server),
+        Err(_) => s.remote_enabled = false,
+    }
+    s.remote_status = format!("Bridge listening on {}", remote::lan_address(port));
+    s.remote_devices = vec![remote::RemoteDevice {
+        name: "Pixel".into(), ip: "192.168.1.24".into(), since: "1763712000".into(),
+    }];
+}
+
 fn scene_providers(s: &mut Rivo) {
     scene_settings(s);
     s.settings_tab = SettingsTab::Connection;
@@ -1181,6 +1553,30 @@ fn scene_providers(s: &mut Rivo) {
             reasoning: true, open_weights: true,
         },
     ];
+}
+
+fn scene_local(s: &mut Rivo) {
+    scene_settings(s);
+    s.settings_tab = SettingsTab::Local;
+    s.local_scanned = true;
+    s.local_models = vec![
+        LocalModel {
+            id: "qwen2.5-coder:7b".into(), name: "Qwen2.5 Coder 7B".into(), backend: "Ollama".into(),
+            host: "127.0.0.1".into(), port: 11434, base_url: "http://127.0.0.1:11434/v1".into(),
+            context: 32_768, local: true,
+        },
+        LocalModel {
+            id: "local-model".into(), name: "Local model".into(), backend: "LM Studio".into(),
+            host: "127.0.0.1".into(), port: 1234, base_url: "http://127.0.0.1:1234/v1".into(),
+            context: 16_384, local: true,
+        },
+        LocalModel {
+            id: "meta-llama-3.1-8b".into(), name: "Llama 3.1 8B".into(), backend: "llama.cpp".into(),
+            host: "192.168.1.42".into(), port: 8080, base_url: "http://192.168.1.42:8080/v1".into(),
+            context: 8_192, local: false,
+        },
+    ];
+    s.local_status = format!("{} models from 3 servers · localhost + 192.168.1.0/24", s.local_models.len());
 }
 
 fn scene_marketplace(s: &mut Rivo) {
@@ -1240,7 +1636,9 @@ fn main() {
             ("checkpoints", scene_checkpoints),
             ("streaming", scene_streaming),
             ("settings", scene_settings),
+            ("remote", scene_remote),
             ("providers", scene_providers),
+            ("local", scene_local),
             ("marketplace", scene_marketplace),
             ("skill-marketplace", scene_skill_marketplace),
         ],

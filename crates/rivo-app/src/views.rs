@@ -6,6 +6,7 @@ use std::fmt::Write;
 use rivo_agent::{
     KILO_FREE_MODELS, Message, PermissionMode, Preset, Protocol, Role, ToolCall, info,
     catalog::Category,
+    local::BACKENDS,
     registry::InstallSpec,
 };
 use rune::{Color, El, Icon, col, el, icon, row, text};
@@ -14,7 +15,7 @@ use rune_kit::{
     Popover, ScrollBar, ScrollBarStyle, TextArea, TextInput,
 };
 
-use crate::{Rivo, InspectorTab, PROJECTS, SettingsTab};
+use crate::{Rivo, InspectorTab, PROJECTS, SettingsTab, remote};
 
 // ----------------------------------------------------------------------------- icons
 
@@ -80,6 +81,10 @@ static CLOSE: Icon = Icon {
 static STORE: Icon = Icon {
     name: "rivo-store", view: 16.0,
     body: r#"<path d="M2.5 6.5L3.5 2.5H12.5L13.5 6.5M2.5 6.5V13H13.5V6.5M2.5 6.5H13.5M6 13V9.5H10V13" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>"#,
+};
+static LOCAL: Icon = Icon {
+    name: "rivo-local", view: 16.0,
+    body: r#"<rect x="2.5" y="3" width="11" height="4.5" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="2.5" y="8.5" width="11" height="4.5" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M5 5.2H5.01M5 10.7H5.01M8 5.2H11M8 10.7H11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
 };
 static BADGE: Icon = Icon {
     name: "rivo-badge", view: 16.0,
@@ -589,6 +594,9 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         .find(|m| m.id == s.config.model)
         .map(|m| m.name.to_string())
         .or_else(|| s.catalog_models.iter().find(|m| m.id == s.config.model).map(|m| m.name.clone()))
+        .or_else(|| s.local_models.iter()
+            .find(|m| m.id == s.config.model && m.base_url == s.config.base_url)
+            .map(|m| m.name.clone()))
         .unwrap_or_else(|| s.config.model.clone());
     let current_model = current_model.as_str();
     let model_trigger = Button::new(format!("{current_model}  ⌄"))
@@ -599,13 +607,17 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         .build(k);
 
     let query = s.model_search.text.trim().to_lowercase();
-    let filtered: Vec<_> = KILO_FREE_MODELS
-        .iter()
-        .filter(|m| query.is_empty() || m.name.to_lowercase().contains(&query) || m.id.to_lowercase().contains(&query))
+    let matches = |name: &str, id: &str| {
+        query.is_empty() || name.to_lowercase().contains(&query) || id.to_lowercase().contains(&query)
+    };
+    let kilo: Vec<_> = KILO_FREE_MODELS.iter()
+        .filter(|m| matches(m.name, m.id)).collect();
+    let local: Vec<_> = s.local_models.iter()
+        .filter(|m| matches(&m.name, &m.id) || m.backend.to_lowercase().contains(&query))
         .collect();
     let mut options = col().key("model-options").w_full().max_h(220.0).min_h(0.0)
         .scroll(rune::ScrollSpec { stick_bottom: false }).scroll_edge_fade(8.0);
-    for m in &filtered {
+    for m in &kilo {
         let id = m.id;
         let selected = s.config.model == id;
         let mut row = row().w_full().min_h(28.0).padding(6.0).radius(k.radius.sm).gap(8.0).center_y()
@@ -617,7 +629,24 @@ pub fn composer(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
         if selected { row = row.child(icon(&CHECK, 14.0).color(k.c.text_accent)); }
         options = options.child(row);
     }
-    if filtered.is_empty() {
+    if !local.is_empty() {
+        options = options.child(text("LOCAL MODELS").font(k.ty.small_medium).color(k.c.text_faint).pl(6.0).pt(4.0));
+    }
+    for m in &local {
+        let id = m.key();
+        let selected = s.config.preset == Preset::Local
+            && s.config.base_url == m.base_url && s.config.model == m.id;
+        let mut row = row().w_full().min_h(28.0).padding(6.0).radius(k.radius.sm).gap(8.0).center_y()
+            .on_press(move |s: &mut Rivo| s.choose_model(&id));
+        if selected { row = row.fill(k.c.hover); } else { row = row.hover(k.c.hover); }
+        row = row.child(col().gap(1.0).grow(1.0)
+            .child(text(m.name.clone()).font(k.ty.ui_compact).color(k.c.text_base))
+            .child(text(format!("{} · {} · {}", m.backend, m.address(), m.id))
+                .font(k.ty.small).color(k.c.text_muted)));
+        if selected { row = row.child(icon(&CHECK, 14.0).color(k.c.text_accent)); }
+        options = options.child(row);
+    }
+    if kilo.is_empty() && local.is_empty() {
         options = options.child(text("No models match").font(k.ty.small).color(k.c.text_muted));
     }
     let options = options.scroll_bar_styled(
@@ -953,6 +982,8 @@ fn settings_nav(s: &Rivo, k: &Kit) -> El {
         .child(text("SETTINGS").font(k.ty.small_medium).color(k.c.text_faint).pl(9.0).pb(6.0))
         .child(settings_nav_item(s, k, "General", SettingsTab::Provider, &SETTINGS))
         .child(settings_nav_item(s, k, "Providers", SettingsTab::Connection, &SEARCH))
+        .child(settings_nav_item(s, k, "Local models", SettingsTab::Local, &LOCAL))
+        .child(settings_nav_item(s, k, "Remote devices", SettingsTab::Remote, &HOME))
         .child(settings_nav_item(s, k, "MCP Marketplace", SettingsTab::McpMarketplace, &STORE))
         .child(settings_nav_item(s, k, "Skills Marketplace", SettingsTab::SkillsMarketplace, &STORE))
         .child(settings_nav_item(s, k, "Skills", SettingsTab::Skills, &CHECK))
@@ -1059,10 +1090,16 @@ fn general_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
 
 fn provider_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let mut presets: Vec<String> = vec!["Mock provider".into(), "Kilo Code — free".into(), "Custom endpoint".into()];
-    let current = match s.settings_preset { Preset::Mock => "Mock provider", Preset::KiloFree => "Kilo Code — free", Preset::Custom => "Custom endpoint" };
+    let mut presets: Vec<String> = vec!["Mock provider".into(), "Kilo Code — free".into(), "Local model".into(), "Custom endpoint".into()];
+    let current = match s.settings_preset {
+        Preset::Mock => "Mock provider", Preset::KiloFree => "Kilo Code — free",
+        Preset::Local => "Local model", Preset::Custom => "Custom endpoint",
+    };
     let preset = select_box(s, k, layer, "provider-select", &presets, current, |s, v| {
-        s.choose_preset(match v { "Kilo Code — free" => Preset::KiloFree, "Custom endpoint" => Preset::Custom, _ => Preset::Mock });
+        s.choose_preset(match v {
+            "Kilo Code — free" => Preset::KiloFree, "Local model" => Preset::Local,
+            "Custom endpoint" => Preset::Custom, _ => Preset::Mock,
+        });
     });
     presets.clear();
 
@@ -1130,7 +1167,11 @@ fn provider_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     col().w_full().gap(18.0)
         .child(text("Providers").font(rune::tok::type_::TITLE).color(c.text_base))
         .child(card(k, "Connection", vec![
-            setting_row(k, "Provider", "Mock runs offline; Kilo's free gateway needs no API key.", preset),
+            setting_row(k, "Provider", "Mock runs offline; Kilo and local models need no API key.", preset),
+            setting_row(k, "Local models", "Discover Ollama, LM Studio, llama.cpp and other servers on this machine or your Wi-Fi.",
+                Button::new("Find local models").variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut Rivo| s.choose_tab(SettingsTab::Local)).build(k)),
             setting_row(k, "Base URL", "Endpoint used for this provider.",
                 rune_kit::TextInput::new(&s.base_url).label("Base URL").width(Some(260.0)).on_edit(|s: &mut Rivo| &mut s.base_url).build(k)),
             setting_row(k, "API key", "Read from the provider's environment variable when one is available.",
@@ -1173,6 +1214,135 @@ fn provider_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(text("Free and open-weight models may log prompts for training — don't send confidential code. Check each provider's terms before use.")
                     .font(k.ty.small).color(c.warning.fg).wrap()),
         )
+}
+
+fn local_panel(s: &Rivo, k: &Kit) -> El {
+    let c = &k.c;
+    let scan = Button::new(if s.local_busy { "Scanning…" } else { "Scan ports" })
+        .variant(ButtonVariant::Contrast).control_size(ControlSize::Small)
+        .on_press(|s: &mut Rivo| s.scan_local()).build(k);
+    let lan = toggle_switch(k, s.local_scan_lan, |s: &mut Rivo| s.toggle_local_lan());
+    let host = TextInput::new(&s.local_host)
+        .placeholder("192.168.1.42 or nas.local")
+        .label("Extra host")
+        .width(Some(210.0))
+        .on_edit(|s: &mut Rivo| &mut s.local_host)
+        .build(k);
+
+    let mut rows = Vec::new();
+    for (i, m) in s.local_models.iter().enumerate() {
+        let active = s.config.preset == Preset::Local
+            && s.config.base_url == m.base_url
+            && s.config.model == m.id;
+        let meta = format!(
+            "{}  ·  {}  ·  {}  ·  {} ctx  ·  {}",
+            m.backend, m.address(), if m.local { "this machine" } else { "LAN" },
+            format_tokens(m.context), m.id
+        );
+        let mut r = row().w_full().min_h(54.0).padding(10.0).gap(12.0).center_y().justify_between();
+        if active { r = r.fill(c.layer_03); } else { r = r.hover(c.hover); }
+        rows.push(r
+            .child(col().grow(1.0).min_w(0.0).gap(3.0)
+                .child(row().gap(8.0).center_y()
+                    .child(text(m.name.clone()).font(k.ty.ui_compact).color(c.text_base).truncate())
+                    .child(text(if m.local { "local" } else { "LAN" })
+                        .font(k.ty.small).color(if m.local { c.success.fg } else { c.text_accent })))
+                .child(text(meta).font(k.ty.small).color(c.text_muted).truncate()))
+            .child(Button::new(if active { "In use" } else { "Use" })
+                .variant(if active { ButtonVariant::Ghost } else { ButtonVariant::Contrast })
+                .control_size(ControlSize::Small)
+                .on_press(move |s: &mut Rivo| s.use_local_model(i)).build(k)));
+    }
+    if rows.is_empty() {
+        rows.push(row().w_full().padding(10.0).child(text(
+            if s.local_busy {
+                "Scanning standard ports…"
+            } else {
+                "No local servers yet. Start Ollama, LM Studio, llama.cpp or another runtime, then press Scan ports."
+            },
+        ).font(k.ty.small).color(c.text_muted).wrap()));
+    }
+
+    let runtimes = BACKENDS.iter()
+        .map(|b| format!("{} :{}", b.name, b.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("/")))
+        .collect::<Vec<_>>()
+        .join("   ·   ");
+
+    col().w_full().gap(18.0)
+        .child(text("Local models").font(rune::tok::type_::TITLE).color(c.text_base))
+        .child(text("Rivo scans the standard ports of local model servers and lists the models they serve. Click Use to connect — no API key, account or cloud needed.")
+            .font(k.ty.body).color(c.text_muted).wrap())
+        .child(card(k, "Discovery", vec![
+            setting_row(k, "Scan", "Probes the standard ports on this machine, and every host on your Wi-Fi subnet when enabled.", scan),
+            setting_row(k, "Same Wi-Fi", "Also scan the local network for servers on another device.", lan),
+            setting_row(k, "Extra host", "Optional single IP or hostname to include in the scan.", host),
+        ]))
+        .child(text(if s.local_status.is_empty() { "Not scanned yet." } else { &s.local_status })
+            .font(k.ty.small).color(c.text_muted).wrap())
+        .child(card(k, "Detected models — click Use to connect", rows))
+        .child(card(k, "Supported runtimes", vec![
+            row().w_full().padding(8.0).child(text(runtimes).font(k.ty.small).color(c.text_muted).wrap()),
+        ]))
+        .child(col().w_full().gap(5.0).padding(12.0).radius(k.radius.md)
+            .fill(c.warning.bg).border(1.0, c.warning.border)
+            .child(text("Local & LAN privacy").font(k.ty.ui_medium).color(c.warning.fg))
+            .child(text("Chats with a local model stay on the machine that serves it. A Wi-Fi scan only sends short TCP connects and a plain HTTP model-list request to hosts on your network; Rivo never uploads files or prompts. Connect only to servers you trust.")
+                .font(k.ty.small).color(c.warning.fg).wrap()))
+}
+
+fn remote_panel(s: &Rivo, k: &Kit) -> El {
+    let c = &k.c;
+    let port = TextInput::new(&s.remote_port)
+        .label("Bridge port")
+        .width(Some(110.0))
+        .on_edit(|s: &mut Rivo| &mut s.remote_port)
+        .build(k);
+    let enabled = toggle_switch(k, s.remote_enabled, |s: &mut Rivo| s.toggle_remote());
+    let url = if s.remote_enabled {
+        remote::lan_address(s.remote_port.text.trim().parse().unwrap_or(8787))
+    } else {
+        "Bridge is off".to_string()
+    };
+    let mut devices = Vec::new();
+    for device in &s.remote_devices {
+        devices.push(row().w_full().min_h(34.0).padding(8.0).gap(8.0).center_y()
+            .child(icon(&CHECK, 12.0).color(c.success.fg))
+            .child(text(device.name.clone()).font(k.ty.ui_compact).color(c.text_base))
+            .child(text(format!("{} · paired {}", device.ip, device.since)).font(k.ty.small).color(c.text_muted)));
+    }
+    if devices.is_empty() {
+        devices.push(row().w_full().padding(8.0).child(text("No devices paired yet.")
+            .font(k.ty.small).color(c.text_muted)));
+    }
+
+    col().w_full().gap(18.0)
+        .child(text("Remote devices").font(rune::tok::type_::TITLE).color(c.text_base))
+        .child(text("Continue Rivo sessions from your phone on the same Wi-Fi network. The phone pairs once with the code below, then becomes a full client: sessions, turns, tools and checkpoints.")
+            .font(k.ty.body).color(c.text_muted).wrap())
+        .child(card(k, "Bridge", vec![
+            setting_row(k, "Enable bridge", "Listen on the local network for the Rivo phone app.", enabled),
+            setting_row(k, "Port", "Default 8787. The phone connects to the URL shown below.", port),
+            setting_row(k, "Address", "Open this on the phone after pairing.",
+                text(url).font(k.ty.mono).color(c.text_accent).wrap().selectable(true)),
+            setting_row(k, "Pairing code", "One-time secret shown to the phone app.",
+                text(s.remote_token.clone()).font(k.ty.mono).color(c.text_base).selectable(true)),
+            setting_row(k, "New code", "Invalidates all previously paired devices.",
+                Button::new("Regenerate").variant(ButtonVariant::Ghost).control_size(ControlSize::Small)
+                    .on_press(|s: &mut Rivo| s.regenerate_remote_code()).build(k)),
+        ]))
+        .child(card(k, "Paired devices", devices))
+        .child(text(if s.remote_status.is_empty() { "Bridge idle." } else { &s.remote_status })
+            .font(k.ty.small).color(c.text_muted).wrap())
+        .child(col().w_full().gap(5.0).padding(12.0).radius(k.radius.md)
+            .fill(c.warning.bg).border(1.0, c.warning.border)
+            .child(text("Security").font(k.ty.ui_medium).color(c.warning.fg))
+            .child(text("LAN only — no cloud relay, no account. Anyone on the same network with the pairing code can read and change files in this workspace. Regenerate the code if a device is lost. The bridge stops when Rivo closes.")
+                .font(k.ty.small).color(c.warning.fg).wrap()))
+        .child(card(k, "Phone API", vec![
+            row().w_full().padding(8.0).child(text(
+                "POST /api/pair {code,name}  ·  GET /api/sessions  ·  POST /api/sessions\nGET /api/sessions/{id}  ·  POST /api/sessions/{id}/message {text}\nGET /api/checkpoints  ·  POST /api/checkpoints {label}  ·  POST /api/checkpoints/restore {id}\nAll calls after pairing use: Authorization: Bearer <token>"
+            ).font(k.ty.mono).color(c.text_muted).wrap().selectable(true)),
+        ]))
 }
 
 fn install_hint(spec: &InstallSpec) -> String {
@@ -1314,6 +1484,8 @@ pub fn settings_page(s: &Rivo, k: &Kit, inset: f32) -> El {
     let panel = match s.settings_tab {
         SettingsTab::Provider => general_panel(s, k, &mut layer),
         SettingsTab::Connection => provider_panel(s, k, &mut layer),
+        SettingsTab::Local => local_panel(s, k),
+        SettingsTab::Remote => remote_panel(s, k),
         SettingsTab::McpMarketplace | SettingsTab::SkillsMarketplace => marketplace_panel(s, k),
         SettingsTab::Skills => skills_panel(s, k),
         SettingsTab::Tools => tools_panel(s, k),

@@ -21,6 +21,7 @@ No API key? Rivo starts on a local mock provider that streams replies word by wo
 - **53 tools** — files (read/write/edit/copy/move/delete, patch, diff), search (glob, grep, symbols), git (status/diff/log, branch, commit, stash, blame, …), commands (allowlisted + background tasks), web (fetch, search, download), session (todos, memory, skills) and **checkpoints**. Every call is shown in the transcript; toggle individual tools in the inspector.
 - **3 wire protocols** — OpenAI-compatible, Anthropic Messages and Google Gemini.
 - **models.dev catalog** — 324 providers and 10,024 models (1,036 free), searchable by name or category (All, Free, Tool-capable, Reasoning, Open weights). One click configures protocol, endpoint, model id, context window and max output. Cached for 24h at `~/.config/rivo/models-dev.json`, with a stale-cache fallback when offline.
+- **Local model discovery** — scans the standard ports of Ollama, LM Studio, llama.cpp, vLLM, LocalAI, text-generation-webui, Jan, GPT4All, KoboldCpp, SGLang, llama-swap and Aphrodite. One click connects to a detected model; optionally scans the same Wi-Fi subnet and an extra host. No API key, no cloud.
 - **Kilo Gateway** — kept as a preset with 14 tool-capable free models, no API key or card (200 requests/hour per IP).
 - **MCP & Skills marketplaces** — add servers from the official MCP Registry and skills from skills.sh in one click, from Settings.
 - **Info-centre inspector** — live context percentage, token/cost breakdown, per-model steps, MCP servers, code-indexing and LSP status, and changed files with `+/-` line counts.
@@ -32,12 +33,14 @@ No API key? Rivo starts on a local mock provider that streams replies word by wo
 
 ## Settings
 
-The Settings window has seven tabs. All **model and context configuration lives in Providers** — there is no separate "Model & context" tab.
+The Settings window has nine tabs. All **model and context configuration lives in Providers** — there is no separate "Model & context" tab.
 
 | Tab | What it does |
 | --- | --- |
 | General | Permissions, theme, workspace/skills folders, shortcut to Providers |
 | Providers | Connection, protocol, models.dev catalog, Kilo Gateway, context and prompt settings |
+| Local models | Port scan, same-Wi-Fi discovery, detected models and one-click connect |
+| Remote devices | LAN bridge for the phone app: enable, port, pairing code and paired devices |
 | MCP Marketplace | Search the official MCP Registry and write entries to `~/.config/rivo/mcp.json` |
 | Skills Marketplace | Search skills.sh and download skills into `<workspace>/.rivo/skills/` |
 | Skills | Enable or disable discovered skills |
@@ -66,6 +69,45 @@ cargo run -p rivo-app --bin rivo
 
 > Free tiers may log prompts for training. Don't send confidential code on them. Open-weight models need the same care: read the provider's terms and review a skill's `SKILL.md` before using it.
 
+## Local models
+
+Open **Settings → Local models** (or **Providers → Find local models**). Rivo probes the standard ports of local runtimes on `127.0.0.1` on a worker thread, then asks each server that answers for its model list. Click **Use** on a model to set the endpoint, model id and a conservative context window — no API key or signup. The same models appear in the composer's model picker under **LOCAL MODELS**, so switching is one click from the chat too.
+
+Supported runtimes and their default ports:
+
+| Runtime | Port | Runtime | Port |
+| --- | --- | --- | --- |
+| Ollama | 11434 | LM Studio | 1234 |
+| llama.cpp | 8080 | vLLM | 8000 |
+| LocalAI | 8081 | text-generation-webui | 5000 |
+| Jan | 1337 | GPT4All | 4891 |
+| KoboldCpp | 5001 | SGLang | 30000 |
+| llama-swap | 9297 | Aphrodite | 2242 |
+
+The scan also covers common self-hosted ports (3000, 8888, 9000). Turn on **Same Wi-Fi** to also sweep this machine's `/24` subnet for servers on other devices, or type a single **Extra host** (IP or hostname). All servers are queried through their OpenAI-compatible `/v1/models` endpoint (with Ollama's native `/api/tags` as a fallback); only TCP connects and a small JSON model list leave Rivo. Local chats stay on the machine serving the model. Connect only to servers you trust.
+
+For a fixed local endpoint, the `local` preset is also available in **Providers** and can be set from the environment:
+
+```bash
+RIVO_PROVIDER=local RIVO_BASE_URL=http://127.0.0.1:11434/v1 RIVO_MODEL=llama3.2 cargo run -p rivo-app --bin rivo
+```
+
+## Remote devices (phone bridge)
+
+Enable the bridge in **Settings → Remote devices**. Rivo listens on the local network (default port 8787), shows the phone a URL (`http://<LAN-IP>:8787`) and a pairing code. The phone is a **full client**: it can list/create sessions, send messages (running the same agent tool loop), inspect results and manage checkpoints.
+
+Pairing happens once with `POST /api/pair {"code": "...", "name": "Pixel"}`; the response contains the bearer token used by all later calls. The API:
+
+```
+GET  /api/status
+GET  /api/sessions                 POST /api/sessions {"title": "..."}
+GET  /api/sessions/{id}            POST /api/sessions/{id}/message {"text": "..."}
+GET  /api/checkpoints              POST /api/checkpoints {"label": "..."}
+POST /api/checkpoints/restore {"id": "..."}
+```
+
+Every call after pairing sends `Authorization: Bearer <token>`. The bridge is LAN-only: no cloud relay, no account, and it stops when Rivo closes. Anyone on the same network with the pairing code can read and change files in the workspace, so regenerate the code if a device is lost. Bridge settings are saved in `~/.config/rivo/config.json`.
+
 ## Marketplaces and trust
 
 - **MCP** comes from the [official MCP Registry](https://registry.modelcontextprotocol.io). Publishers verify a GitHub or DNS namespace, but the registry hosts metadata only and does **not** scan server code — review a server before adding it. Added servers load on restart.
@@ -91,6 +133,8 @@ cargo run -p rivo-app --bin rivo -- --scene demo --snap /tmp/demo.png --size 116
 cargo run -p rivo-app --bin rivo -- --scene checkpoints --snap /tmp/checkpoints.png
 cargo run -p rivo-app --bin rivo -- --scene settings --snap /tmp/settings.png
 cargo run -p rivo-app --bin rivo -- --scene providers --snap /tmp/providers.png
+cargo run -p rivo-app --bin rivo -- --scene local --snap /tmp/local.png
+cargo run -p rivo-app --bin rivo -- --scene remote --snap /tmp/remote.png
 cargo run -p rivo-app --bin rivo -- --scene marketplace --snap /tmp/mcp.png
 cargo run -p rivo-app --bin rivo -- --scene skill-marketplace --snap /tmp/skills.png
 cargo run -p rivo-app --bin rivo -- --scene demo --tree
