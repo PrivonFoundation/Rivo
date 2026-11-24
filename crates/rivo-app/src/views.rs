@@ -4,7 +4,7 @@
 use std::fmt::Write;
 
 use rivo_agent::{
-    KILO_FREE_MODELS, Message, PermissionMode, Preset, Protocol, Role, ToolCall, info,
+    AgentMode, KILO_FREE_MODELS, Message, Preset, Protocol, Role, ToolCall, info,
     catalog::Category,
     local::BACKENDS,
     registry::InstallSpec,
@@ -1048,9 +1048,16 @@ fn toggle_switch<F: Fn(&mut Rivo) + 'static>(k: &Kit, on: bool, press: F) -> El 
 
 fn general_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let permissions: Vec<String> = vec![PermissionMode::Auto.label().to_string(), PermissionMode::ReadOnly.label().to_string()];
-    let permission = select_box(s, k, layer, "permission-select", &permissions, s.agent_settings.permission.label(), |s, v| {
-        s.set_permission(if v.starts_with("Read") { PermissionMode::ReadOnly } else { PermissionMode::Auto });
+    let permissions: Vec<String> = vec![AgentMode::Plan.label().to_string(), AgentMode::Agent.label().to_string(), AgentMode::Full.label().to_string()];
+    let permission = select_box(s, k, layer, "permission-select", &permissions, s.agent_settings.mode.label(), |s, v| {
+        let mode = if v.starts_with("Plan") {
+            AgentMode::Plan
+        } else if v.starts_with("Full") {
+            AgentMode::Full
+        } else {
+            AgentMode::Agent
+        };
+        s.set_mode(mode);
     });
 
     let themes: Vec<String> = vec!["System".into(), "Dark".into(), "Light".into()];
@@ -1069,7 +1076,7 @@ fn general_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(select_box(s, k, layer, "env-select", &["All workspaces".into(), "Current workspace".into()], "All workspaces", |_, _| {})),
         )
         .child(card(k, "Agent defaults", vec![
-            setting_row(k, "Permissions", "Read-only blocks writes and commands.", permission),
+            setting_row(k, "Agent mode", "Plan is read-only; Agent writes and runs allowlisted commands; Full runs any command.", permission),
             setting_row(k, "Provider & model", "Endpoint, protocol, model, context and instructions are configured under Providers.",
                 Button::new("Open Providers").variant(ButtonVariant::Ghost)
                     .control_size(ControlSize::Small)
@@ -1473,20 +1480,31 @@ fn tools_panel(s: &Rivo, k: &Kit) -> El {
 
 fn permissions_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let modes: Vec<String> = vec![PermissionMode::Auto.label().to_string(), PermissionMode::ReadOnly.label().to_string()];
-    let mode = select_box(s, k, layer, "mode-select", &modes, s.agent_settings.permission.label(), |s, v| {
-        s.set_permission(if v.starts_with("Read") { PermissionMode::ReadOnly } else { PermissionMode::Auto });
+    let modes: Vec<String> = vec![AgentMode::Plan.label().to_string(), AgentMode::Agent.label().to_string(), AgentMode::Full.label().to_string()];
+    let mode = select_box(s, k, layer, "mode-select", &modes, s.agent_settings.mode.label(), |s, v| {
+        let mode = if v.starts_with("Plan") {
+            AgentMode::Plan
+        } else if v.starts_with("Full") {
+            AgentMode::Full
+        } else {
+            AgentMode::Agent
+        };
+        s.set_mode(mode);
     });
+    let allowlist = if s.agent_settings.mode.enforces_command_allowlist() {
+        text("Enforced").font(k.ty.ui).color(c.success.fg)
+    } else {
+        text("Off (Full permission)").font(k.ty.ui).color(c.text_muted)
+    };
     col().w_full().gap(18.0)
         .child(text("Permissions").font(rune::tok::type_::TITLE).color(c.text_base))
         .child(card(k, "Safety", vec![
-            setting_row(k, "Tool permission", "Auto allows tools; Read-only blocks writes and commands.", mode),
+            setting_row(k, "Agent mode", "Plan: read-only. Agent: writes + allowlisted commands. Full: any command.", mode),
             setting_row(k, "Max steps", "Tool loop iterations allowed per turn.",
                 text(s.agent_settings.max_steps.to_string()).font(k.ty.ui).color(c.text_muted)),
             setting_row(k, "Workspace confinement", "Absolute paths, .. and escaping symlinks are rejected.",
                 text("Enforced").font(k.ty.ui).color(c.success.fg)),
-            setting_row(k, "Command allowlist", "No shell metacharacters; 30 second timeout.",
-                text("Enforced").font(k.ty.ui).color(c.success.fg)),
+            setting_row(k, "Command allowlist", "No shell metacharacters; 30 second timeout.", allowlist),
         ]))
         .child(card(k, "Advanced", vec![
             setting_row(k, "Endpoint", "Where chat requests are sent.",

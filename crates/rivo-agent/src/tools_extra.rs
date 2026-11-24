@@ -759,7 +759,7 @@ impl Tool for RunCommandBg {
     fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<String, String> {
         ctx.writable()?;
         let command = arg_str(args, "command")?;
-        let parts = command_parts(&command)?;
+        let parts = command_parts(ctx.mode, &command)?;
         let root = ctx.workspace.canonicalize().map_err(|e| e.to_string())?;
         let dir = root.join(".rivo/tasks");
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -994,9 +994,9 @@ impl Tool for SystemInfo {
     fn description(&self) -> &'static str { "Report OS, architecture, workspace path and tool/skill counts." }
     fn schema(&self) -> Value { json!({"type":"object","properties":{},"additionalProperties":false}) }
     fn execute(&self, ctx: &ToolContext, _: &Value) -> Result<String, String> {
-        Ok(format!("OS: {}\nArch: {}\nWorkspace: {}\nTools: {}\nSkills: {}\nPermission: {:?}",
+        Ok(format!("OS: {}\nArch: {}\nWorkspace: {}\nTools: {}\nSkills: {}\nMode: {}",
             std::env::consts::OS, std::env::consts::ARCH, ctx.workspace.display(),
-            crate::tools::all_tools().len(), ctx.skills.len(), ctx.permission))
+            crate::tools::all_tools().len(), ctx.skills.len(), ctx.mode.label()))
     }
 }
 
@@ -1045,7 +1045,7 @@ impl Tool for CheckpointRestore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::PermissionMode;
+    use crate::settings::AgentMode;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     fn ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext::new(dir.to_path_buf(), PermissionMode::Auto, Vec::new())
+        ToolContext::new(dir.to_path_buf(), AgentMode::Agent, Vec::new())
     }
 
     #[test]
@@ -1098,9 +1098,9 @@ mod tests {
     }
 
     #[test]
-    fn write_tools_are_blocked_in_read_only_mode() {
+    fn write_tools_are_blocked_in_plan_mode() {
         let dir = workspace();
-        let c = ToolContext::new(dir.clone(), PermissionMode::ReadOnly, Vec::new());
+        let c = ToolContext::new(dir.clone(), AgentMode::Plan, Vec::new());
         assert!(CreateDir.execute(&c, &json!({"path":"x"})).is_err());
         assert!(DeleteFile.execute(&c, &json!({"path":"x"})).is_err());
         assert!(GitCommit.execute(&c, &json!({"message":"m"})).is_err());

@@ -5,20 +5,69 @@ use crate::model::{Message, ProviderConfig, Protocol};
 use crate::skills::{Skill, discover};
 use std::path::Path;
 
+/// What the agent is allowed to do during a turn. This is the agent-level
+/// permission model surfaced in the UI and persisted in the config.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PermissionMode {
-    /// Tools run without asking (writes stay confined to the workspace).
-    Auto,
-    /// Writes and commands are refused; only read-only tools run.
-    ReadOnly,
+pub enum AgentMode {
+    /// Read and research only. The agent investigates the workspace and
+    /// produces a plan; it cannot modify files or run commands.
+    Plan,
+    /// Read, write, and run commands. Writes and commands stay confined to the
+    /// workspace and commands are limited to a safe allowlist.
+    Agent,
+    /// Full permission. Reads, writes, and runs any command (no allowlist).
+    /// File access still stays inside the workspace.
+    Full,
 }
 
-impl PermissionMode {
+impl AgentMode {
     pub fn label(self) -> &'static str {
         match self {
-            PermissionMode::Auto => "Auto (tools allowed)",
-            PermissionMode::ReadOnly => "Read-only",
+            AgentMode::Plan => "Plan (read-only)",
+            AgentMode::Agent => "Agent",
+            AgentMode::Full => "Full permission",
         }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            AgentMode::Plan => "Reads and researches only; proposes a plan. No writes or commands.",
+            AgentMode::Agent => "Reads, writes, and runs allowlisted commands in the workspace.",
+            AgentMode::Full => "Reads, writes, and runs any command. No allowlist.",
+        }
+    }
+
+    /// Parse a persisted/selected mode string, accepting legacy values.
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "plan" | "readonly" => AgentMode::Plan,
+            "full" => AgentMode::Full,
+            _ => AgentMode::Agent,
+        }
+    }
+
+    /// Stable key used when persisting to the config file.
+    pub fn key(self) -> &'static str {
+        match self {
+            AgentMode::Plan => "plan",
+            AgentMode::Agent => "agent",
+            AgentMode::Full => "full",
+        }
+    }
+
+    /// Whether file writes and edits are permitted.
+    pub fn allows_write(self) -> bool {
+        matches!(self, AgentMode::Agent | AgentMode::Full)
+    }
+
+    /// Whether commands may run at all.
+    pub fn allows_command(self) -> bool {
+        matches!(self, AgentMode::Agent | AgentMode::Full)
+    }
+
+    /// Whether the non-destructive command allowlist is enforced.
+    pub fn enforces_command_allowlist(self) -> bool {
+        matches!(self, AgentMode::Plan | AgentMode::Agent)
     }
 }
 
@@ -68,7 +117,7 @@ impl ModelConfig {
 
 #[derive(Clone, Debug)]
 pub struct AgentSettings {
-    pub permission: PermissionMode,
+    pub mode: AgentMode,
     pub enabled_tools: Vec<String>,
     pub enabled_skills: Vec<String>,
     pub max_steps: usize,
@@ -80,7 +129,7 @@ pub struct AgentSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
-            permission: PermissionMode::Auto,
+            mode: AgentMode::Agent,
             enabled_tools: Vec::new(), // empty means "all tools"
             enabled_skills: Vec::new(), // empty means "all skills"
             max_steps: 12,

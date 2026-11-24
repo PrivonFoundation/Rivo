@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use rivo_agent::{
     AgentSettings, ChatInput, Event, EventKind, KILO_FREE_MODELS, Message, ModelConfig,
-    PermissionMode, Preset, Protocol, ProviderConfig, Role, RunConfig, Session, Skill, TokenUsage,
+    AgentMode, Preset, Protocol, ProviderConfig, Role, RunConfig, Session, Skill, TokenUsage,
     catalog::{self, CatalogModel, Category},
     checkpoint::Checkpoint,
     context, info::{McpServer, ModifiedFile},
@@ -693,8 +693,8 @@ impl Rivo {
         self.connection_status.clear();
     }
 
-    pub fn set_permission(&mut self, mode: PermissionMode) {
-        self.agent_settings.permission = mode;
+    pub fn set_mode(&mut self, mode: AgentMode) {
+        self.agent_settings.mode = mode;
     }
 
     pub fn toggle_skill(&mut self, name: &str) {
@@ -1173,10 +1173,7 @@ fn load_config() -> Option<SavedConfig> {
     if let Some(n) = v.get("max_output").and_then(serde_json::Value::as_u64) { model.max_output = n as usize; }
     if let Some(n) = v.get("temperature").and_then(serde_json::Value::as_f64) { model.temperature = n as f32; }
     let mut settings = AgentSettings::default();
-    settings.permission = match v.get("permission").and_then(serde_json::Value::as_str).unwrap_or("") {
-        "readonly" => PermissionMode::ReadOnly,
-        _ => PermissionMode::Auto,
-    };
+    settings.mode = AgentMode::from_key(v.get("permission").and_then(serde_json::Value::as_str).unwrap_or(""));
     settings.system_prompt = get("system_prompt");
     settings.max_steps = v.get("max_steps").and_then(serde_json::Value::as_u64).unwrap_or(12) as usize;
     settings.auto_compact = v.get("auto_compact").and_then(serde_json::Value::as_bool).unwrap_or(true);
@@ -1203,10 +1200,7 @@ fn save_config(config: &ProviderConfig, model: &ModelConfig, settings: &AgentSet
         Protocol::Anthropic => "anthropic",
         Protocol::Gemini => "gemini",
     };
-    let permission = match settings.permission {
-        PermissionMode::Auto => "auto",
-        PermissionMode::ReadOnly => "readonly",
-    };
+    let permission = settings.mode.key();
     let mut json = serde_json::json!({
         "preset": preset,
         "base_url": config.base_url,

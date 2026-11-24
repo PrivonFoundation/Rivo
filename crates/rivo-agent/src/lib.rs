@@ -21,5 +21,5 @@ pub use model::{
     ChatInput, Event, EventKind, FreeModel, Message, Preset, Protocol, ProviderConfig, ProviderKind,
     Role, Session, TokenUsage, ToolCall, KILO_BASE_URL, KILO_FREE_MODELS,
 };
-pub use settings::{AgentSettings, ModelConfig, PermissionMode, RunConfig};
+pub use settings::{AgentMode, AgentSettings, ModelConfig, RunConfig};
 pub use skills::Skill;
