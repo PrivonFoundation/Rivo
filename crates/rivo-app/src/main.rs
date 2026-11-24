@@ -112,6 +112,13 @@ pub struct Rivo {
     pub catalog_status: String,
     pub catalog_busy: bool,
     catalog_rx: Option<mpsc::Receiver<Result<Vec<CatalogModel>, String>>>,
+    // Official models.dev provider logos, downloaded once and cached for 24h by the agent.
+    image_cache: Option<rune::ImageCache>,
+    pub provider_images: HashMap<String, rune::Image>,
+    /// Headless scenes run before `AppSpec::setup`; poll loads cached logos once it is available.
+    seed_logos: bool,
+    logos_rx: Option<mpsc::Receiver<Vec<(String, Vec<u8>)>>>,
+    pub logos_status: String,
     // Local model discovery (localhost + same-Wi-Fi servers)
     pub local_models: Vec<LocalModel>,
     pub local_status: String,
@@ -240,6 +247,11 @@ impl Rivo {
             catalog_status: String::new(),
             catalog_busy: false,
             catalog_rx: None,
+            image_cache: None,
+            provider_images: HashMap::new(),
+            seed_logos: false,
+            logos_rx: None,
+            logos_status: String::new(),
             local_models: Vec::new(),
             local_status: String::new(),
             local_busy: false,
@@ -467,17 +479,48 @@ impl Rivo {
         }
     }
 
-    /// Fetch models.dev (~7 MB, 324 providers) on a worker thread; cached for 24 hours.
+    /// Show the cached catalog immediately, then refresh it on a worker thread. A slow or
+    /// unreachable models.dev must never leave the Providers screen empty.
     pub fn load_catalog(&mut self) {
         if self.catalog_rx.is_some() {
             return;
         }
+        let cached = catalog::cached();
+        let had_cache = cached.is_some();
+        if let Some(models) = cached {
+            let ids: Vec<String> = models.iter()
+                .flat_map(|m| [m.lab.clone(), m.provider.clone()])
+                .collect::<std::collections::HashSet<_>>().into_iter().collect();
+            self.load_logos(ids);
+            self.catalog_models = models;
+            self.catalog_status = if catalog::is_fresh() {
+                "models.dev cache is up to date".into()
+            } else {
+                "models.dev cache — refreshing in the background…".into()
+            };
+        } else {
+            self.catalog_status = "Loading models.dev catalog…".into();
+        }
         let (tx, rx) = mpsc::channel();
         self.catalog_rx = Some(rx);
         self.catalog_busy = true;
-        self.catalog_status = "Loading models.dev catalog…".into();
         thread::spawn(move || {
-            let _ = tx.send(catalog::load());
+            let result = if had_cache { catalog::refresh() } else { catalog::load() };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Download the official models.dev logos for the catalog's providers. Reads the 24-hour
+    /// disk cache first, so this only touches the network on a cold start or after expiry.
+    fn load_logos(&mut self, ids: Vec<String>) {
+        if self.logos_rx.is_some() || ids.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.logos_rx = Some(rx);
+        self.logos_status = "Loading provider logos…".into();
+        thread::spawn(move || {
+            let _ = tx.send(catalog::ensure_logos(&ids));
         });
     }
 
@@ -1248,6 +1291,23 @@ fn ms(n: u64) -> Duration {
 
 fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
+    if s.seed_logos {
+        s.seed_logos = false;
+        if let Some(cache) = &s.image_cache {
+            let ids: Vec<String> = s.catalog_models.iter()
+                .flat_map(|m| [m.lab.clone(), m.provider.clone()])
+                .collect::<std::collections::HashSet<_>>().into_iter().collect();
+            let images: Vec<(String, rune::Image)> = ids.into_iter()
+                .filter_map(|id| {
+                    let bytes = catalog::cached_logo_bytes(&id)?;
+                    Some((id, cache.svg(bytes, 22.0, 2.0)))
+                })
+                .collect();
+            s.logos_status = format!("{} provider logos cached for 24h", images.len());
+            s.provider_images = images.into_iter().collect();
+            changed = true;
+        }
+    }
     while let Ok(ev) = s.events.try_recv() {
         changed |= s.apply_event(ev);
     }
@@ -1303,16 +1363,40 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
             match result {
                 Ok(models) => {
                     let count = models.len();
-                    let providers = models.iter().map(|m| m.provider.as_str()).collect::<std::collections::HashSet<_>>().len();
+                    let providers = models.iter().map(|m| m.provider.as_str())
+                        .collect::<std::collections::HashSet<_>>().len();
+                    let ids: Vec<String> = models.iter()
+                        .flat_map(|m| [m.lab.clone(), m.provider.clone()])
+                        .collect::<std::collections::HashSet<_>>().into_iter().collect();
                     s.catalog_status = format!("{count} models from {providers} providers · models.dev · cached for 24h");
+                    s.load_logos(ids);
                     s.catalog_models = models;
                 }
                 Err(message) => {
-                    s.catalog_status = format!("Could not load models.dev: {message}");
+                    let count = s.catalog_models.len();
+                    s.catalog_status = if count > 0 {
+                        format!("{count} models from cache — models.dev refresh failed: {message}")
+                    } else {
+                        format!("Could not load models.dev: {message}")
+                    };
                 }
             }
             s.catalog_busy = false;
             s.catalog_rx = None;
+            changed = true;
+        }
+    }
+    if let Some(rx) = &s.logos_rx {
+        if let Ok(entries) = rx.try_recv() {
+            let images: Vec<(String, rune::Image)> = match &s.image_cache {
+                Some(cache) => entries.into_iter()
+                    .map(|(id, bytes)| (id, cache.svg(bytes, 22.0, 2.0)))
+                    .collect(),
+                None => Vec::new(),
+            };
+            s.logos_status = format!("{} provider logos cached for 24h", images.len());
+            s.provider_images = images.into_iter().collect();
+            s.logos_rx = None;
             changed = true;
         }
     }
@@ -1361,7 +1445,7 @@ fn poll(s: &mut Rivo, clock: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
-    if s.busy() || s.testing || s.registry_busy || s.catalog_busy || s.local_busy || s.checkpoint_busy {
+    if s.busy() || s.testing || s.registry_busy || s.catalog_busy || s.logos_rx.is_some() || s.local_busy || s.checkpoint_busy {
         tx.wake_after(ms(16));
     }
     if s.remote_enabled {
@@ -1532,27 +1616,10 @@ fn scene_providers(s: &mut Rivo) {
     scene_settings(s);
     s.settings_tab = SettingsTab::Connection;
     s.catalog_category = Category::Free;
-    s.catalog_status = "250 models from 84 providers · models.dev · cached for 24h".into();
-    s.catalog_models = vec![
-        CatalogModel {
-            id: "cohere/north-mini-code:free".into(), name: "Cohere North Mini Code".into(),
-            description: "Tuned for code. A good default for this agent.".into(),
-            provider: "kilo".into(), provider_name: "Kilo Gateway".into(),
-            base_url: rivo_agent::KILO_BASE_URL.into(), env: String::new(),
-            protocol: rivo_agent::Protocol::OpenAiCompatible, context: 256_000, max_output: 4096,
-            input_cost: 0.0, output_cost: 0.0, free: true, tool_call: true,
-            reasoning: false, open_weights: false,
-        },
-        CatalogModel {
-            id: "qwen/qwen3-coder:free".into(), name: "Qwen3 Coder".into(),
-            description: "Open-weight coding model with tool calling.".into(),
-            provider: "openrouter".into(), provider_name: "OpenRouter".into(),
-            base_url: "https://openrouter.ai/api/v1".into(), env: "OPENROUTER_API_KEY".into(),
-            protocol: rivo_agent::Protocol::OpenAiCompatible, context: 262_144, max_output: 8192,
-            input_cost: 0.0, output_cost: 0.0, free: true, tool_call: true,
-            reasoning: true, open_weights: true,
-        },
-    ];
+    // Use the real cached catalog so the scene also exercises the quick cache path.
+    s.load_catalog();
+    // Scenes run before setup; poll picks up the cached logos once the image cache exists.
+    s.seed_logos = true;
 }
 
 fn scene_local(s: &mut Rivo) {
@@ -1644,6 +1711,7 @@ fn main() {
         ],
         poll: Some(poll),
         on_key: Some(on_key),
+        setup: Some(|s, waker| s.image_cache = Some(rune::ImageCache::new(waker))),
         ..AppSpec::new("Rivo — native coding agent", (1160.0, 760.0), Rivo::new, view)
     };
     let chrome = Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true };

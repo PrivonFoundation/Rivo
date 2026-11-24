@@ -1136,8 +1136,26 @@ fn provider_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
     let mut catalog_rows = Vec::new();
     for (i, m) in filtered.iter().take(40).enumerate() {
         let cost = if m.free { "free".to_string() } else { format!("${:.2}/${:.2} per 1M", m.input_cost, m.output_cost) };
-        let meta = format!("{}  ·  {}  ·  {} ctx  ·  {}", m.provider_name, m.protocol.label(), format_tokens(m.context), cost);
+        let maker = if m.lab == m.provider {
+            m.provider_name.clone()
+        } else {
+            format!("{} via {}", m.lab, m.provider_name)
+        };
+        let meta = format!("{}  ·  {}  ·  {} ctx  ·  {}", maker, m.protocol.label(), format_tokens(m.context), cost);
+        // Official models.dev logo when cached; a neutral initial keeps the row stable meanwhile.
+        let mut logo = row().key(format!("logo-{}", m.provider)).w(22.0).h(22.0)
+            .radius(k.radius.sm).center();
+        if let Some(image) = s.provider_images.get(&m.lab)
+            .or_else(|| s.provider_images.get(&m.provider))
+        {
+            logo = logo.child(el().w(22.0).h(22.0).pixels(image.pixels()));
+        } else {
+            logo = logo.fill(c.layer_03).child(text(
+                m.provider.chars().next().unwrap_or('?').to_uppercase().to_string()
+            ).font(k.ty.small).color(c.text_muted));
+        }
         catalog_rows.push(row().w_full().min_h(52.0).padding(10.0).gap(12.0).center_y().justify_between()
+            .child(logo)
             .child(col().grow(1.0).min_w(0.0).gap(3.0)
                 .child(text(m.name.clone()).font(k.ty.ui_compact).color(c.text_base).truncate())
                 .child(text(meta).font(k.ty.small).color(c.text_muted).truncate())
@@ -1151,10 +1169,11 @@ fn provider_panel(s: &Rivo, k: &Kit, layer: &mut Vec<El>) -> El {
             if s.catalog_busy { "Loading catalog…" } else { "No models match this filter." }
         ).font(k.ty.small).color(c.text_muted)));
     }
+    let logos = if s.logos_status.is_empty() { String::new() } else { format!("  ·  {}", s.logos_status) };
     let catalog_status = if s.catalog_status.is_empty() {
-        "models.dev — free, open-source catalog; no API key needed.".to_string()
+        format!("models.dev — free, open-source catalog; no API key needed.{logos}")
     } else {
-        format!("{}  ·  showing {} of {}", s.catalog_status, filtered.len().min(40), filtered.len())
+        format!("{}  ·  showing {} of {}{}", s.catalog_status, filtered.len().min(40), filtered.len(), logos)
     };
 
     let kilo_models: Vec<String> = KILO_FREE_MODELS.iter().map(|m| m.id.to_string()).collect();
