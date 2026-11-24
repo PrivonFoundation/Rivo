@@ -44,7 +44,7 @@ fn execute(
     let model = run.provider.model.clone();
     let tools: Vec<_> = all_tools().into_iter().filter(|t| run.settings.tool_enabled(t.name())).collect();
     let ChatInput { messages, cwd } = input;
-    let ctx = ToolContext::new(cwd, run.settings.permission, run.skills.clone());
+    let ctx = ToolContext::new(cwd, run.settings.mode, run.skills.clone());
     let mut history = messages;
 
     for step in 0..run.settings.max_steps {

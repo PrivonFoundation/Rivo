@@ -85,7 +85,7 @@ fn tool_results_stay_inside_the_workspace() {
     use rivo_agent::tools::{ToolContext, all_tools};
     let dir = std::env::temp_dir().join(format!("rivo-sandbox-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let ctx = ToolContext::new(dir.clone(), rivo_agent::PermissionMode::Auto, Vec::new());
+    let ctx = ToolContext::new(dir.clone(), rivo_agent::AgentMode::Agent, Vec::new());
     let tools = all_tools();
     let write = tools.iter().find(|t| t.name() == "write_file").unwrap();
     assert!(write.execute(&ctx, &serde_json::json!({"path": "../escape.txt", "content": "x"})).is_err());

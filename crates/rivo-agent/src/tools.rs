@@ -10,24 +10,25 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::settings::PermissionMode;
+use crate::settings::AgentMode;
 use crate::skills::Skill;
 
 pub struct ToolContext {
     pub workspace: PathBuf,
-    pub permission: PermissionMode,
+    pub mode: AgentMode,
     pub skills: Vec<Skill>,
 }
 
 impl ToolContext {
-    pub fn new(workspace: PathBuf, permission: PermissionMode, skills: Vec<Skill>) -> Self {
-        Self { workspace, permission, skills }
+    pub fn new(workspace: PathBuf, mode: AgentMode, skills: Vec<Skill>) -> Self {
+        Self { workspace, mode, skills }
     }
 
     pub(crate) fn writable(&self) -> Result<(), String> {
-        match self.permission {
-            PermissionMode::Auto => Ok(()),
-            PermissionMode::ReadOnly => Err("read-only mode: switch to Auto in Settings to write files or run commands".into()),
+        if self.mode.allows_write() {
+            Ok(())
+        } else {
+            Err("plan mode: switch to Agent or Full permission in Settings to write files or run commands".into())
         }
     }
 }
@@ -279,18 +280,22 @@ pub(crate) fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 }
 
 /// Parse and validate a command line: no shell metacharacters, allowlisted program.
-pub(crate) fn command_parts(command: &str) -> Result<Vec<String>, String> {
+/// The program allowlist is enforced in Plan and Agent modes; Full permission
+/// runs any program (the shell-metacharacter guard always applies).
+pub(crate) fn command_parts(mode: AgentMode, command: &str) -> Result<Vec<String>, String> {
     let bad = [';', '&', '|', '>', '<', '$', '`', '\n', '\r', '(', ')', '{', '}', '\\'];
     if command.chars().any(|c| bad.contains(&c)) {
         return Err("shell metacharacters are not allowed".into());
     }
     let parts: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
     let Some(program) = parts.first() else { return Err("empty command".into()) };
-    const ALLOW: &[&str] = &[
-        "cargo", "git", "ls", "pwd", "cat", "rg", "find", "rustc", "node", "python3", "uname", "echo", "printf",
-    ];
-    if !ALLOW.contains(&program.as_str()) {
-        return Err(format!("{program} is not on the allowlist"));
+    if mode.enforces_command_allowlist() {
+        const ALLOW: &[&str] = &[
+            "cargo", "git", "ls", "pwd", "cat", "rg", "find", "rustc", "node", "python3", "uname", "echo", "printf",
+        ];
+        if !ALLOW.contains(&program.as_str()) {
+            return Err(format!("{program} is not on the allowlist"));
+        }
     }
     Ok(parts)
 }
@@ -309,7 +314,7 @@ impl Tool for RunCommand {
     fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<String, String> {
         ctx.writable()?;
         let command = arg_str(args, "command")?;
-        let parts = command_parts(&command)?;
+        let parts = command_parts(ctx.mode, &command)?;
         let root = ctx.workspace.canonicalize().map_err(|e| e.to_string())?;
         let mut child = Command::new(&parts[0])
             .args(&parts[1..])
@@ -572,7 +577,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> ToolContext {
-        ToolContext::new(std::env::temp_dir(), PermissionMode::Auto, Vec::new())
+        ToolContext::new(std::env::temp_dir(), AgentMode::Agent, Vec::new())
     }
 
     #[test]
@@ -584,17 +589,26 @@ mod tests {
     }
 
     #[test]
-    fn read_only_mode_blocks_writes() {
-        let c = ToolContext::new(std::env::temp_dir(), PermissionMode::ReadOnly, Vec::new());
+    fn plan_mode_blocks_writes_and_commands() {
+        let c = ToolContext::new(std::env::temp_dir(), AgentMode::Plan, Vec::new());
         assert!(WriteFile.execute(&c, &json!({"path": "x", "content": "y"})).is_err());
         assert!(RunCommand.execute(&c, &json!({"command": "pwd"})).is_err());
     }
 
     #[test]
-    fn command_allowlist_blocks_destructive_input() {
+    fn agent_mode_enforces_command_allowlist() {
         let c = ctx();
         assert!(RunCommand.execute(&c, &json!({"command": "rm -rf /"})).is_err());
         assert!(RunCommand.execute(&c, &json!({"command": "git status && rm x"})).is_err());
+    }
+
+    #[test]
+    fn full_mode_runs_any_command() {
+        let c = ToolContext::new(std::env::temp_dir(), AgentMode::Full, Vec::new());
+        // `true` is not on the allowlist but Full permission runs any program.
+        assert!(RunCommand.execute(&c, &json!({"command": "true"})).is_ok());
+        // Shell metacharacters stay blocked even with full permission.
+        assert!(RunCommand.execute(&c, &json!({"command": "echo a; echo b"})).is_err());
     }
 
     #[test]

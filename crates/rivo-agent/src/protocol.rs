@@ -7,7 +7,7 @@ use std::io::Read;
 use serde_json::{Value, json};
 
 use crate::model::{Message, ProviderConfig, Role, TokenUsage, ToolCall};
-use crate::settings::ModelConfig;
+use crate::settings::{AgentMode, ModelConfig};
 use crate::provider::StreamEvent;
 use crate::tools::{Tool, openai_specs};
 
@@ -20,6 +20,14 @@ allowlisted and background commands, web lookup, session notes and checkpoints. 
 Prefer reading before writing. Keep changes small and focused. Explain what you did \
 briefly when you are finished. Use Markdown in your answers.\n",
     );
+    s.push_str(match run.settings.mode {
+        AgentMode::Plan => "\n## Mode: Plan\nYou are in Plan mode. Investigate the workspace and produce a clear, \
+            actionable plan. Do not modify files or run commands: write and command tools are disabled.\n",
+        AgentMode::Agent => "\n## Mode: Agent\nYou may read, write files, and run allowlisted commands inside the \
+            workspace. Prefer small, focused changes.\n",
+        AgentMode::Full => "\n## Mode: Full permission\nYou may read, write files, and run any command. File access \
+            stays inside the workspace. Use this freedom carefully.\n",
+    });
     if !run.settings.system_prompt.trim().is_empty() {
         s.push_str("\n## User instructions\n\n");
         s.push_str(run.settings.system_prompt.trim());
