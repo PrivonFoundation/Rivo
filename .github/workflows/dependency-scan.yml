@@ -1,0 +1,96 @@
+name: Dependency Scan
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    # Mondays, 05:27 UTC: catch advisories published against unchanged code.
+    - cron: "27 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  audit:
+    name: RustSec advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Only advisories that affect the locked graph fail the job; unmaintained
+      # or unsound-but-unreachable crates are reported without blocking.
+      - name: Scan Cargo.lock against the RustSec advisory database
+        run: cargo audit
+
+  deny:
+    name: cargo-deny policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # advisories  - duplicates the RustSec check with cargo-deny's database
+      # licenses    - flags copyleft/unknown licenses in the dependency tree
+      # bans        - duplicate major versions and wildcard requirements
+      # sources     - rejects crates from outside crates.io / the pinned patches
+      - name: Check advisories, licenses, bans and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+          manifest-path: Cargo.toml
+
+  unused:
+    name: Unused dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+
+      # Informational: a stale entry is worth reporting, not worth blocking a merge.
+      - name: Report dependencies that no source file references
+        continue-on-error: true
+        run: cargo machete

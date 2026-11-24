@@ -1,0 +1,49 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:27"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(dev-deps)"
+    labels:
+      - dependencies
+      - rust
+    groups:
+      rust-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+    ignore:
+      # Rune is pinned as a submodule and patched in the workspace root; its
+      # vendored crates are not published for independent updates.
+      - dependency-name: "rune*"
+      - dependency-name: "wgpu-hal"
+      - dependency-name: "winit"
+      - dependency-name: "parley_engine"
+      - dependency-name: "accesskit_*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:27"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(ci)"
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
